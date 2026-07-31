@@ -1,0 +1,78 @@
+{
+  "background_image": "assets/image/background.jpeg",
+
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "zoom_amount": 1.06,
+    "fit_mode": "contain",
+    "pad_color": [0, 0, 0],
+    "image_anchor": 0.8
+  },
+
+  "duration": {
+    "mode": "auto",
+    "words_per_second": 2.0,
+    "buffer_seconds": 3.0,
+    "min_seconds": 7,
+    "max_seconds": 15
+  },
+
+  "text": {
+    "font": "/System/Library/Fonts/Supplemental/Optima.ttc",
+    "font_index": 1,
+    "max_size": 76,
+    "min_size": 40,
+    "color": [255, 255, 255],
+    "line_spacing": 1.38,
+    "width_fraction": 0.84,
+    "vertical_anchor": 0.28,
+    "max_height_fraction": 0.34,
+    "shadow_opacity": 150,
+    "scrim_opacity": 0
+  },
+
+  "audio": {
+    "fade_in_seconds": 1.0,
+    "fade_out_seconds": 1.5
+  },
+
+  "retention": {
+    "enabled": true,
+    "days": 60,
+    "keep_minimum": 10
+  },
+
+  "caption": {
+    "hashtags": {
+      "instagram": [
+        "#astrology",
+        "#spiritualguidance",
+        "#dailyastrology",
+        "#innerwork",
+        "#spiritualawakening",
+        "#cosmicwisdom",
+        "#astrologyposts",
+        "#healingjourney",
+        "#intuition",
+        "#mindfulness",
+        "#soulwork",
+        "#divineguidance"
+      ],
+      "tiktok": [
+        "#astrology",
+        "#spiritualtok",
+        "#astrologytok",
+        "#dailyguidance",
+        "#healing"
+      ],
+      "youtube": [
+        "#Shorts",
+        "#astrology",
+        "#spiritualguidance",
+        "#dailyguidance"
+      ]
+    }
+  }
+}

@@ -1,0 +1,18 @@
+output/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# OAuth tokens, credentials and personal identifiers — never commit these.
+secrets/
+.env
+*.token.json
+*.local.md
+
+# Music is ~146 MB and fully regenerable: `python3 src/fetch_music.py` rebuilds
+# it from CC0 sources. The manifest is tracked so the track list survives.
+assets/music/**/*.mp3
+!assets/music/manifest.json
+
+.DS_Store
