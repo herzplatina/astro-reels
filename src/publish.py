@@ -36,6 +36,11 @@ from platforms import (
 ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = ROOT / "output" / "publish_state.json"
 
+# After this many transient failures a platform stops being retried
+# automatically. Without a ceiling a genuinely broken reel would be retried
+# forever and the failure would never rise above the noise.
+MAX_ATTEMPTS = 5
+
 # A host that never got cleaned up because a publish failed should not sit
 # public forever. This is only a backstop; the normal path is publish-gated.
 STRANDED_AFTER_DAYS = 14
@@ -82,11 +87,48 @@ def all_published(entry: dict) -> bool:
 
 
 def pending_platforms(entry: dict) -> list[str]:
+    """Everything not yet published, regardless of why."""
     return [
         p
         for p in PLATFORMS
         if entry["platforms"].get(p, {}).get("status") != "published"
     ]
+
+
+def blocked_platforms(entry: dict) -> list[str]:
+    """Platforms where retrying is pointless — refused outright, or out of attempts.
+
+    Kept separate from `pending` so a permanent refusal stops consuming attempts
+    and starts demanding a human instead.
+    """
+    blocked = []
+    for platform in pending_platforms(entry):
+        record = entry["platforms"].get(platform, {})
+        if record.get("permanent") or record.get("attempts", 0) >= MAX_ATTEMPTS:
+            blocked.append(platform)
+    return blocked
+
+
+def retryable_platforms(entry: dict) -> list[str]:
+    blocked = set(blocked_platforms(entry))
+    return [p for p in pending_platforms(entry) if p not in blocked]
+
+
+def release_host(entry: dict, video: Path, dry_run: bool, reason: str) -> None:
+    """Remove the video from hosting. Idempotent, and safe to call again.
+
+    Reachable from every exit path on purpose: a crash between the last
+    successful publish and this call would otherwise strand the file publicly
+    with no route back, since a later run would find nothing left to publish.
+    """
+    if entry["cleaned_up"]:
+        return
+    if dry_run:
+        print(f"  would remove from hosting ({reason})")
+        return
+    hosting.unpublish(video.name)
+    entry["cleaned_up"] = True
+    print(f"  removed from hosting ({reason})")
 
 
 # ---------------------------------------------------------------- captions
@@ -126,7 +168,8 @@ def publish_one(platform: str, video: Path, url: str, dry_run: bool) -> PublishR
         if platform == "tiktok":
             return publish_tiktok(video, caption)
     except CredentialsMissing as exc:
-        return PublishResult(False, error=str(exc))
+        # Nothing about retrying fixes an absent token — this needs a person.
+        return PublishResult(False, error=str(exc), permanent=True)
     except Exception as exc:  # noqa: BLE001 - one platform must not stop the rest
         return PublishResult(False, error=f"{type(exc).__name__}: {exc}")
 
@@ -137,10 +180,30 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
     state = load_state()
     entry = entry_for(state, video)
 
-    targets = only or pending_platforms(entry)
+    targets = only or retryable_platforms(entry)
+
+    # Nothing left to attempt. This branch must still reach the cleanup, because
+    # a crash after the final publish but before the unpublish lands here on the
+    # next run — and an early return would strand the file public forever.
     if not targets:
-        print(f"{video.name} is already published everywhere.")
-        return 0
+        if all_published(entry):
+            release_host(entry, video, dry_run, "all three confirmed")
+            save_state(state)
+            print(f"{video.name} is published everywhere.")
+            return 0
+
+        blocked = blocked_platforms(entry)
+        print(f"  no retries left for: {', '.join(blocked)}")
+        for platform in blocked:
+            record = entry["platforms"][platform]
+            why = "refused" if record.get("permanent") else "out of attempts"
+            print(f"    {platform}: {why} — {record.get('error', '')[:90]}")
+        print(
+            "  still hosted. Fix the cause and use --retry, or give up on this reel\n"
+            f"  with --abandon {video.stem} to release the host."
+        )
+        save_state(state)
+        return 1
 
     # Host first. Instagram cannot publish without a public URL, and hosting
     # once for all retries keeps the URL stable.
@@ -156,32 +219,64 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
         save_state(state)
 
     for platform in targets:
+        previous = entry["platforms"].get(platform, {})
         result = publish_one(platform, video, entry["hosted_url"], dry_run)
+        attempts = previous.get("attempts", 0) + 1
         entry["platforms"][platform] = {
             "status": "published" if result.ok else "failed",
             "id": result.post_id,
             "error": result.error,
+            "attempts": attempts,
+            "permanent": bool(result.permanent),
             "at": _now(),
         }
-        mark = "ok" if result.ok else "FAILED"
-        detail = result.post_id if result.ok else result.error
-        print(f"  {platform:10} {mark:7} {detail}")
+
+        if result.ok:
+            print(f"  {platform:10} ok      {result.post_id}")
+        else:
+            note = (
+                "will not retry"
+                if result.permanent
+                else f"attempt {attempts}/{MAX_ATTEMPTS}"
+            )
+            print(f"  {platform:10} FAILED  [{note}] {result.error}")
         save_state(state)
 
     # The rule: the host is released only when every platform has confirmed.
-    if all_published(entry) and not entry["cleaned_up"]:
-        if dry_run:
-            print("  would remove from hosting (all three confirmed)")
-        else:
-            hosting.unpublish(video.name)
-            print("  removed from hosting (all three confirmed)")
-        entry["cleaned_up"] = True
-    elif not all_published(entry):
+    if all_published(entry):
+        release_host(entry, video, dry_run, "all three confirmed")
+    else:
         remaining = ", ".join(pending_platforms(entry))
         print(f"  kept hosted — not yet published on: {remaining}")
 
     save_state(state)
     return 0 if all_published(entry) else 1
+
+
+def abandon(slug: str, dry_run: bool = False) -> int:
+    """Give up on a reel: release the host and stop tracking it as outstanding.
+
+    The deliberate escape hatch from a permanently failing publish. Without it
+    the only ways out would be waiting for the sweep or editing state by hand.
+    """
+    state = load_state()
+    entry = state.get(slug)
+    if not entry:
+        raise SystemExit(f"No record of {slug!r}. Try --status.")
+
+    published = [
+        p
+        for p in PLATFORMS
+        if entry["platforms"].get(p, {}).get("status") == "published"
+    ]
+    if published:
+        print(f"  note: already live on {', '.join(published)} — those posts stay up.")
+
+    release_host(entry, Path(entry["file"]), dry_run, f"abandoned {slug}")
+    if not dry_run:
+        entry["abandoned"] = True
+        save_state(state)
+    return 0
 
 
 # ------------------------------------------------------------------ reports
@@ -193,13 +288,37 @@ def show_status() -> int:
         print("Nothing published yet.")
         return 0
 
+    needs_attention = []
     for slug, entry in sorted(state.items()):
         flags = " ".join(
             f"{p[:2]}:{entry['platforms'].get(p, {}).get('status', '?')[:4]}"
             for p in PLATFORMS
         )
-        host = "released" if entry["cleaned_up"] else "hosted"
+        if entry.get("abandoned"):
+            host = "abandoned"
+        elif entry["cleaned_up"]:
+            host = "released"
+        else:
+            host = "HOSTED"
         print(f"  {slug[:44]:46} {flags:28} {host}")
+        if blocked_platforms(entry) and not entry.get("abandoned"):
+            needs_attention.append(slug)
+
+    # A stuck reel keeps a file public indefinitely, so it must not be something
+    # you have to notice by reading the table carefully.
+    if needs_attention:
+        print(f"\n{len(needs_attention)} stuck and still hosted — needs a decision:")
+        for slug in needs_attention:
+            entry = state[slug]
+            for platform in blocked_platforms(entry):
+                record = entry["platforms"][platform]
+                why = "refused" if record.get("permanent") else "out of attempts"
+                print(
+                    f"  {slug[:38]:40} {platform:10} {why}: {record.get('error', '')[:60]}"
+                )
+        print(
+            "\n  --retry <slug> after fixing the cause, or --abandon <slug> to give up."
+        )
     return 0
 
 
@@ -210,7 +329,7 @@ def sweep(dry_run: bool = False) -> int:
     released = 0
 
     for slug, entry in state.items():
-        if entry["cleaned_up"] or not entry["hosted_at"]:
+        if entry["cleaned_up"] or entry.get("abandoned") or not entry["hosted_at"]:
             continue
         if dt.datetime.fromisoformat(entry["hosted_at"]) > cutoff:
             continue
@@ -241,6 +360,11 @@ def main() -> int:
     parser.add_argument("--sweep", action="store_true")
     parser.add_argument("--retry", metavar="SLUG")
     parser.add_argument(
+        "--abandon",
+        metavar="SLUG",
+        help="Give up on a reel and release its hosted file.",
+    )
+    parser.add_argument(
         "--only", nargs="+", choices=PLATFORMS, help="Publish to these platforms only."
     )
     args = parser.parse_args()
@@ -249,6 +373,8 @@ def main() -> int:
         return show_status()
     if args.sweep:
         return sweep(args.dry_run)
+    if args.abandon:
+        return abandon(args.abandon, args.dry_run)
 
     if args.retry:
         state = load_state()
@@ -258,6 +384,15 @@ def main() -> int:
         video = ROOT / entry["file"]
         if not video.exists():
             raise SystemExit(f"{video} is gone — re-render before retrying.")
+
+        # An explicit retry is a person saying they have fixed the cause, so it
+        # clears the block that automatic runs respect. Otherwise repairing
+        # credentials would leave the reel permanently unretryable.
+        for platform in pending_platforms(entry):
+            entry["platforms"][platform]["permanent"] = False
+            entry["platforms"][platform]["attempts"] = 0
+        save_state(state)
+
         return run(video, args.dry_run, only=pending_platforms(entry))
 
     if not args.video:

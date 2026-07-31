@@ -50,6 +50,29 @@ this into cleaning up after a partial success.
   platform that already succeeded is never retried.
 - `--sweep` is a backstop only, for hosts stranded by a publish that never
   completed. It is not the primary cleanup path.
+
+**Only genuine confirmation counts as success.** A false success releases the
+hosted file, so each client verifies rather than assumes:
+
+- TikTok's upload completing means the bytes arrived, not that the post went
+  live — poll `publish/status/fetch` until `PUBLISH_COMPLETE`. Never treat the
+  chunk upload as the end of the story.
+- YouTube returns a video ID even when an unaudited project locks the video
+  private, so check the returned `privacyStatus` and fail if it is not public.
+- Instagram's container must reach `FINISHED` before publishing.
+
+**`release_host()` must be reachable from every exit path**, including the one
+where nothing is left to publish. A crash between the final publish and the
+unpublish lands there on the next run, and an early return would strand the file
+public with no route back.
+
+Failures are classified `permanent` (refusals — credentials, 400/401/403,
+policy) or transient. Permanent failures are never retried automatically;
+transient ones stop at `MAX_ATTEMPTS`. An explicit `--retry` clears the block,
+because that is a person saying they fixed the cause. `--abandon` is the escape
+hatch from a permanently stuck reel and is the only thing that releases a host
+without a successful publish.
+
 - Only **Instagram** needs hosting — it exclusively fetches from a public URL.
   YouTube takes a resumable upload and TikTok a chunked upload. TikTok's
   `PULL_FROM_URL` would need DNS-record domain verification, impossible on

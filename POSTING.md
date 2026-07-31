@@ -29,6 +29,44 @@ python3 src/publish.py --sweep                     # release stranded hosts
 State lives in `output/publish_state.json`, so an interrupted run resumes rather
 than double-posting. A platform that already succeeded is never retried.
 
+## When a publish fails
+
+**How you find out.** The run prints `FAILED` with the reason and exits `1`.
+Nothing is silent, and `--status` marks the reel `HOSTED` in caps with a
+"needs a decision" block listing every stuck platform and why.
+
+**What counts as success.** Only genuine confirmation, because a false success
+releases the hosted file:
+
+- **Instagram** — the container is polled until `FINISHED`, then published.
+- **TikTok** — the upload finishing only means the bytes arrived. The publish
+  status is polled until `PUBLISH_COMPLETE`; a failure during processing is
+  caught rather than assumed away.
+- **YouTube** — the returned `privacyStatus` is checked. An unaudited project
+  uploads happily and gets an ID back, but the video is locked private. That is
+  reported as a failure, because a video nobody can watch is not published.
+
+**Permanent versus transient.** A refusal (missing credentials, `400`, `401`,
+`403`, a policy rejection) is marked permanent and never retried automatically —
+retrying cannot help, and burning attempts on it only buries the real problem.
+Everything else is transient and retried up to `MAX_ATTEMPTS` (5).
+
+**How to retry.** `--retry <slug>` attempts only what has not succeeded, and
+clears the permanent flag — an explicit retry is you saying you fixed the cause.
+Re-running the plain command retries transient failures only.
+
+**If it keeps failing.** After the attempt ceiling, or on a permanent refusal,
+the reel stops being retried and says so. The file stays hosted, because giving
+up silently would leave it public with no record. Two ways out:
+
+- fix the cause and `--retry <slug>`
+- `--abandon <slug>` — releases the hosted file and stops tracking it. Posts
+  that already went live stay live, and it tells you which those were.
+
+`--sweep` is the last resort: it releases anything still hosted after 14 days,
+so a forgotten failure cannot keep a file public indefinitely. Abandoned reels
+are skipped.
+
 ## Why only Instagram needs hosting
 
 The three platforms ingest video differently:

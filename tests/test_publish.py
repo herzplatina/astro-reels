@@ -236,3 +236,165 @@ def test_sweep_dry_run_changes_nothing(workspace, monkeypatch):
     publish_mod.sweep(dry_run=True)
     assert video.name in hosted
     assert not publish_mod.load_state()["a-reel"]["cleaned_up"]
+
+
+# --------------------------------------------------- failure classification
+
+
+def _failing(monkeypatch, mapping):
+    """mapping: platform -> (ok, permanent)"""
+
+    def fake(platform, video, url, dry_run):
+        ok, permanent = mapping[platform]
+        return PublishResult(
+            ok,
+            post_id=f"{platform}-id" if ok else "",
+            error="" if ok else "boom",
+            permanent=permanent,
+        )
+
+    monkeypatch.setattr(publish_mod, "publish_one", fake)
+
+
+def test_a_permanent_failure_is_not_retried(workspace, monkeypatch):
+    """A refusal will be refused identically; retrying only wastes attempts."""
+    video, _ = workspace
+    _failing(
+        monkeypatch,
+        {"instagram": (False, True), "youtube": (True, False), "tiktok": (True, False)},
+    )
+    publish_mod.run(video)
+
+    attempted = []
+    monkeypatch.setattr(
+        publish_mod,
+        "publish_one",
+        lambda p, v, u, d: attempted.append(p) or PublishResult(True, post_id="x"),
+    )
+    publish_mod.run(video)
+    assert attempted == [], "a permanent failure must not be retried automatically"
+
+
+def test_transient_failures_stop_after_the_attempt_ceiling(workspace, monkeypatch):
+    video, _ = workspace
+    _failing(
+        monkeypatch,
+        {
+            "instagram": (False, False),
+            "youtube": (True, False),
+            "tiktok": (True, False),
+        },
+    )
+    for _ in range(publish_mod.MAX_ATTEMPTS + 3):
+        publish_mod.run(video)
+
+    entry = publish_mod.load_state()["a-reel"]
+    assert entry["platforms"]["instagram"]["attempts"] == publish_mod.MAX_ATTEMPTS
+    assert "instagram" in publish_mod.blocked_platforms(entry)
+
+
+def test_a_blocked_reel_stays_hosted(workspace, monkeypatch):
+    """Being stuck must never quietly release the file."""
+    video, hosted = workspace
+    _failing(
+        monkeypatch,
+        {"instagram": (False, True), "youtube": (True, False), "tiktok": (True, False)},
+    )
+    publish_mod.run(video)
+    assert publish_mod.run(video) == 1
+    assert video.name in hosted
+
+
+def test_attempts_accumulate_across_runs(workspace, monkeypatch):
+    video, _ = workspace
+    _failing(
+        monkeypatch,
+        {
+            "instagram": (False, False),
+            "youtube": (False, False),
+            "tiktok": (False, False),
+        },
+    )
+    publish_mod.run(video)
+    publish_mod.run(video)
+    entry = publish_mod.load_state()["a-reel"]
+    assert entry["platforms"]["tiktok"]["attempts"] == 2
+
+
+# ------------------------------------------------------ crash-safe cleanup
+
+
+def test_cleanup_still_happens_after_a_crash_before_unpublish(workspace, monkeypatch):
+    """The bug this guards: dying between the last publish and the unpublish.
+
+    The next run finds nothing left to publish, so an early return would strand
+    the file public with no route back.
+    """
+    video, hosted = workspace
+    _failing(monkeypatch, {p: (True, False) for p in publish_mod.PLATFORMS})
+    publish_mod.run(video)
+
+    # Simulate the crash: every platform confirmed, but cleanup never ran.
+    state = publish_mod.load_state()
+    state["a-reel"]["cleaned_up"] = False
+    publish_mod.save_state(state)
+    hosted[video.name] = True
+
+    assert publish_mod.run(video) == 0
+    assert hosted == {}, "cleanup must be reachable when nothing is left to publish"
+
+
+def test_release_host_is_idempotent(workspace, monkeypatch):
+    video, hosted = workspace
+    _failing(monkeypatch, {p: (True, False) for p in publish_mod.PLATFORMS})
+    publish_mod.run(video)
+    publish_mod.run(video)
+    assert hosted == {}
+
+
+# ------------------------------------------------------------ escape hatch
+
+
+def test_abandon_releases_a_permanently_stuck_reel(workspace, monkeypatch):
+    video, hosted = workspace
+    _failing(
+        monkeypatch,
+        {"instagram": (False, True), "youtube": (True, False), "tiktok": (True, False)},
+    )
+    publish_mod.run(video)
+    assert video.name in hosted
+
+    publish_mod.abandon("a-reel")
+    assert hosted == {}
+    assert publish_mod.load_state()["a-reel"]["abandoned"]
+
+
+def test_sweep_ignores_an_abandoned_reel(workspace, monkeypatch):
+    video, hosted = workspace
+    _failing(monkeypatch, {p: (False, True) for p in publish_mod.PLATFORMS})
+    publish_mod.run(video)
+    publish_mod.abandon("a-reel")
+
+    state = publish_mod.load_state()
+    state["a-reel"]["hosted_at"] = "2000-01-01T00:00:00+00:00"
+    publish_mod.save_state(state)
+    publish_mod.sweep()
+    assert publish_mod.load_state()["a-reel"]["abandoned"]
+
+
+def test_explicit_retry_clears_a_permanent_block(workspace, monkeypatch):
+    """After fixing credentials, --retry must be able to try again."""
+    video, _ = workspace
+    _failing(
+        monkeypatch,
+        {"instagram": (False, True), "youtube": (True, False), "tiktok": (True, False)},
+    )
+    publish_mod.run(video)
+
+    entry = publish_mod.load_state()["a-reel"]
+    assert "instagram" in publish_mod.blocked_platforms(entry)
+
+    for platform in publish_mod.pending_platforms(entry):
+        entry["platforms"][platform]["permanent"] = False
+        entry["platforms"][platform]["attempts"] = 0
+    assert publish_mod.retryable_platforms(entry) == ["instagram"]

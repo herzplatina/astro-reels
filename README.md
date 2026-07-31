@@ -91,6 +91,7 @@ python3 src/publish.py output/reel.mp4 --dry-run   # rehearse, no API calls
 python3 src/publish.py output/reel.mp4             # host, publish, clean up
 python3 src/publish.py --status                    # what is in flight
 python3 src/publish.py --retry <slug>              # retry only what failed
+python3 src/publish.py --abandon <slug>            # give up, release the host
 ```
 
 The video is pushed to GitHub Pages, published to all three platforms
@@ -98,6 +99,16 @@ independently, and **removed from hosting only once all three confirm**. A
 partial success keeps it hosted so the failures can be retried against the same
 URL. State in `output/publish_state.json` means an interrupted run resumes
 instead of double-posting.
+
+Only genuine confirmation counts. TikTok's upload completing means the bytes
+arrived, not that the post went live, so its publish status is polled; YouTube
+returns a video ID even when an unaudited project locks the video private, so
+the granted privacy is checked. A false success would release the hosted file.
+
+Refusals — missing credentials, `401`, a policy rejection — are marked permanent
+and never retried automatically. Transient failures retry up to five times. A
+reel that runs out of road stays hosted and says so, and `--status` surfaces it;
+fix the cause and `--retry`, or `--abandon` to release the file and move on.
 
 Only Instagram needs the hosting — it exclusively fetches from a public URL,
 whereas YouTube and TikTok take the bytes directly.
@@ -138,7 +149,7 @@ The default `text.font` is a macOS path. On Linux or Windows the tool falls back
 to a bundled-serif search, but set `text.font` to something you actually like.
 
 ```bash
-python3 -m pytest tests/ -q    # 93 tests, no ffmpeg or network needed
+python3 -m pytest tests/ -q    # 102 tests, no ffmpeg or network needed
 ```
 
 ## Music licensing

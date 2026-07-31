@@ -38,6 +38,15 @@ class PublishResult:
     ok: bool
     post_id: str = ""
     error: str = ""
+    # True when retrying cannot possibly help: missing credentials, a rejected
+    # token, a policy refusal. Distinguishing these stops the retry loop
+    # hammering a wall forever and surfaces the problem to a human instead.
+    permanent: bool = False
+
+
+# HTTP statuses where the request itself was understood and refused. Retrying
+# an identical request will be refused identically.
+PERMANENT_STATUSES = frozenset({400, 401, 403, 404, 422})
 
 
 class CredentialsMissing(RuntimeError):
@@ -123,7 +132,11 @@ def publish_instagram(
         ),
     )
     if status != 200 or "id" not in body:
-        return PublishResult(False, error=f"container creation failed: {body}")
+        return PublishResult(
+            False,
+            error=f"container creation failed: {body}",
+            permanent=status in PERMANENT_STATUSES,
+        )
     container = body["id"]
 
     # Instagram downloads and transcodes before the container is publishable.
@@ -136,7 +149,11 @@ def publish_instagram(
         if code == "FINISHED":
             break
         if code == "ERROR":
-            return PublishResult(False, error=f"container error: {body.get('status')}")
+            # Instagram rejected the media itself; the same file will be
+            # rejected again.
+            return PublishResult(
+                False, error=f"container error: {body.get('status')}", permanent=True
+            )
         time.sleep(5)
     else:
         return PublishResult(False, error="container did not finish in time")
@@ -147,7 +164,11 @@ def publish_instagram(
         data=_form({"creation_id": container, "access_token": token}),
     )
     if status != 200 or "id" not in body:
-        return PublishResult(False, error=f"publish failed: {body}")
+        return PublishResult(
+            False,
+            error=f"publish failed: {body}",
+            permanent=status in PERMANENT_STATUSES,
+        )
     return PublishResult(True, post_id=str(body["id"]))
 
 
@@ -224,7 +245,28 @@ def publish_youtube(video: Path, title: str, description: str) -> PublishResult:
         timeout=600,
     )
     if status not in (200, 201) or "id" not in (body or {}):
-        return PublishResult(False, error=f"upload failed: {body}")
+        return PublishResult(
+            False,
+            error=f"upload failed: {body}",
+            permanent=status in PERMANENT_STATUSES,
+        )
+
+    # An unaudited project uploads successfully and gets a video ID back, but
+    # YouTube silently locks the video private and the lock cannot be appealed.
+    # Treating that as published would be a lie that releases the hosted file
+    # for a video nobody can watch.
+    granted = ((body.get("status") or {}).get("privacyStatus") or "").lower()
+    if granted and granted != "public":
+        return PublishResult(
+            False,
+            post_id=str(body["id"]),
+            error=(
+                f"uploaded as {granted!r}, not public — this is the unaudited-project "
+                "lock, and it cannot be appealed. Complete the YouTube API audit, "
+                "then re-upload by hand."
+            ),
+            permanent=True,
+        )
     return PublishResult(True, post_id=str(body["id"]))
 
 
@@ -294,7 +336,48 @@ def publish_tiktok(
         )
         if upload_status not in (200, 201, 206):
             return PublishResult(
-                False, error=f"chunk {index + 1}/{chunks} failed: {upload_body}"
+                False,
+                error=f"chunk {index + 1}/{chunks} failed: {upload_body}",
+                permanent=upload_status in PERMANENT_STATUSES,
             )
 
-    return PublishResult(True, post_id=str(publish_id or ""))
+    # The upload finishing only means the bytes arrived. TikTok then processes
+    # the video, and that can still fail. Reporting success here would let the
+    # orchestrator delete the hosted file for a post that never went live.
+    return _await_tiktok_publish(token, str(publish_id or ""))
+
+
+def _await_tiktok_publish(
+    token: str, publish_id: str, poll_seconds: int = 300
+) -> PublishResult:
+    import time
+
+    if not publish_id:
+        return PublishResult(False, error="no publish_id returned from init")
+
+    deadline = time.time() + poll_seconds
+    last = ""
+    while time.time() < deadline:
+        status, body = _request(
+            "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
+            method="POST",
+            data=_json_body({"publish_id": publish_id}),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=UTF-8",
+            },
+        )
+        data = (body or {}).get("data") or {}
+        last = data.get("status", "")
+        if last in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"):
+            return PublishResult(True, post_id=publish_id)
+        if last == "FAILED":
+            reason = data.get("fail_reason", body)
+            return PublishResult(
+                False, error=f"processing failed: {reason}", permanent=True
+            )
+        time.sleep(5)
+
+    return PublishResult(
+        False, error=f"still {last or 'unknown'} after {poll_seconds}s — check the app"
+    )
