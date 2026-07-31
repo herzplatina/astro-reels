@@ -47,7 +47,6 @@ render rather than warn after the fact.
 | `overflow`          | Glyphs fall outside the safe area — which shrinks to match the zoom, since text safe on the first frame can be cropped by the last |
 | `subject-collision` | Text lands on the lit subject, found by luminance rather than hardcoded coordinates                                                |
 | `contrast`          | WCAG ratio under the glyphs drops below 4.5:1                                                                                      |
-| `music-affinity`    | _(warning only)_ The text leans strongly toward a category the chosen track is not from                                            |
 
 ```
 This reel would not look right:
@@ -58,9 +57,32 @@ This reel would not look right:
 `--force` renders anyway. On failure the intermediate frames stay in
 `output/.build/` so you can see what tripped.
 
-The music check is a keyword heuristic, not comprehension — it catches a line
-about oceans landing on a sitar, and will miss subtler mismatches. It cannot
-judge whether a track _sounds_ right, which is why it warns rather than blocks.
+Whether a track _suits_ a line is deliberately not checked — that is a judgement
+for whoever reviews the reel.
+
+## Instrumental only
+
+Background music must be pure instrumental: no lyrics, no singing, and no spoken
+or incidental human voice. `fetch_music.py` screens Openverse tags before
+downloading, and `audit_music.py` re-screens the whole library.
+
+```bash
+python3 src/audit_music.py --dry-run           # report only
+python3 src/audit_music.py                     # quarantine anything with a voice
+python3 src/audit_music.py --restore <id>      # walk back a false positive
+```
+
+Flagged tracks move to `assets/music_quarantine/`, never deleted. Screening
+leans towards over-flagging on purpose: a wrongly quarantined track is one
+restore away, whereas a reel that starts singing is already published.
+
+Tags are human-written and therefore fallible, so there is one check that
+trusts no metadata at all — a montage of every track in the library, with a
+printed index, to listen through in a few minutes:
+
+```bash
+python3 src/audit_music.py --preview
+```
 
 ## Setup
 

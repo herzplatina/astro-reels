@@ -443,11 +443,9 @@ def render(
     background = prepare_background(cfg)
     text_layer = render_text_layer(text, cfg)
 
-    errors, warnings = validate(text, text_layer, background, cfg, track.category)
-    for warning in warnings:
-        print(warning.render(), file=sys.stderr)
-    if errors:
-        report = "\n".join(problem.render() for problem in errors)
+    problems = validate(text_layer, background, cfg)
+    if problems:
+        report = "\n".join(problem.render() for problem in problems)
         if not force:
             # The intermediate frames are left in place deliberately — opening
             # output/.build/ shows exactly what tripped the check.

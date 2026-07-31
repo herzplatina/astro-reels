@@ -19,6 +19,8 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+from audit_music import screen
+
 ROOT = Path(__file__).resolve().parent.parent
 MUSIC_DIR = ROOT / "assets" / "music"
 MANIFEST = MUSIC_DIR / "manifest.json"
@@ -89,6 +91,21 @@ def search(query: str) -> list[dict]:
             continue
         if not item.get("url"):
             continue
+
+        # The background bed must be pure instrumental, always. Screen before
+        # downloading so a vocal track never enters the library in the first
+        # place; audit_music.py is the safety net for anything already there.
+        tags = [t.get("name", "") for t in (item.get("tags") or [])]
+        is_vocal, reasons = screen(
+            item.get("title") or "", tags, item.get("genres") or []
+        )
+        if is_vocal:
+            print(
+                f"  - skipped {(item.get('title') or '')[:40]!r} "
+                f"(voice: {', '.join(reasons)})"
+            )
+            continue
+
         out.append(item)
         if len(out) >= PER_QUERY:
             break

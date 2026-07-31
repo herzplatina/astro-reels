@@ -196,57 +196,17 @@ def check_contrast(
     return []
 
 
-def check_music_affinity(text: str, category: str, cfg: dict) -> list[Problem]:
-    """Warn when the text leans strongly toward a category the track is not from.
-
-    This is a keyword heuristic, not comprehension. It catches the obvious
-    mismatches — a line about oceans over a tabla — and will miss subtler ones.
-    Treated as a warning rather than an error for exactly that reason.
-    """
-    validation = cfg["validation"]
-    if not validation.get("music_affinity_check", True):
-        return []
-
-    keywords = validation["music_keywords"]
-    lowered = f" {text.lower()} "
-    scores = {
-        cat: sum(1 for word in words if f" {word}" in lowered)
-        for cat, words in keywords.items()
-    }
-
-    best = max(scores, key=lambda c: scores[c])
-    margin = validation["music_affinity_margin"]
-    runner_up = max((v for c, v in scores.items() if c != best), default=0)
-
-    # Only speak up when one category clearly dominates.
-    if scores[best] == 0 or scores[best] - runner_up < margin:
-        return []
-    if best == category:
-        return []
-
-    return [
-        Problem(
-            "music-affinity",
-            f"the text reads as {best!r} but the track is {category!r}",
-            f"Re-run with --music {best} to match, or ignore this — it is a "
-            "keyword guess, not a judgement about how it sounds.",
-        )
-    ]
-
-
 # ------------------------------------------------------------------- driver
 
 
-def validate(
-    text: str,
-    text_layer_path: Path,
-    background_path: Path,
-    cfg: dict,
-    music_category: str,
-) -> tuple[list[Problem], list[Problem]]:
-    """Run every check. Returns (errors, warnings)."""
+def validate(text_layer_path: Path, background_path: Path, cfg: dict) -> list[Problem]:
+    """Run every check on the composed frame. Returns the problems found.
+
+    Only visual checks live here. Whether a track *suits* a line is a judgement
+    call for whoever reviews the reel, not something to guess at in code.
+    """
     if not cfg.get("validation", {}).get("enabled", True):
-        return [], []
+        return []
 
     text_layer = Image.open(text_layer_path).convert("RGBA")
     # The prepared background is 2x for zoom headroom; compare at frame scale.
@@ -257,10 +217,8 @@ def validate(
     )
     zoom = cfg["video"].get("zoom_amount", 1.0)
 
-    errors: list[Problem] = []
-    errors += check_overflow(text_layer, cfg, zoom)
-    errors += check_subject_collision(text_layer, background, cfg)
-    errors += check_contrast(text_layer, background, cfg)
-
-    warnings = check_music_affinity(text, music_category, cfg)
-    return errors, warnings
+    problems: list[Problem] = []
+    problems += check_overflow(text_layer, cfg, zoom)
+    problems += check_subject_collision(text_layer, background, cfg)
+    problems += check_contrast(text_layer, background, cfg)
+    return problems

@@ -19,6 +19,15 @@ H.264 output in `output/`.
   is CC0 or an equivalent no-attribution commercial-use grant. Anything else
   risks Instagram/TikTok Content ID muting or removing the reel. `fetch_music.py`
   filters on `license=cc0` — do not loosen that filter.
+- **Music must be pure instrumental, always.** No lyrics, no singing, and no
+  spoken or incidental human voice of any kind. `fetch_music.py` screens tags
+  before downloading and `audit_music.py` re-screens the whole library; both
+  share the same term lists. Screening leans towards over-flagging on purpose —
+  a wrongly quarantined track is one `--restore` away, whereas a reel that
+  starts singing over the text is already published.
+  Tags are human-written and therefore fallible, so
+  `python3 src/audit_music.py --preview` builds one montage of every track for
+  a listen-through. That is the only check that does not trust metadata.
 - **Never commit credentials.** OAuth tokens live in `secrets/`, which is
   gitignored. Do not print refresh tokens to the terminal.
 - **Duration must stay within 5–90s.** Instagram only surfaces videos in the
@@ -45,10 +54,9 @@ Errors — measured from actual pixels, not estimated:
   _under the glyphs only_, against `min_contrast_ratio` (4.5:1). Averaging the
   whole frame would let a bright corner rescue unreadable text.
 
-Warning — **music-affinity**. A keyword heuristic, not comprehension. It only
-speaks up when one category beats the runner-up by `music_affinity_margin`, so
-an incidental word does not override the random pick. It cannot judge whether a
-track _sounds_ right; that judgement belongs to whoever reviews the reel.
+Whether a track _suits_ a line is deliberately **not** checked. That is a
+judgement call for whoever reviews the reel; a keyword guess at it produces
+noise and gets ignored. Do not reintroduce it.
 
 `--force` renders despite errors. On failure the intermediate frames are left in
 `output/.build/` on purpose — open them to see what tripped.

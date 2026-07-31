@@ -1,6 +1,5 @@
 {
   "background_image": "assets/image/background.jpeg",
-
   "video": {
     "width": 1080,
     "height": 1920,
@@ -10,7 +9,6 @@
     "pad_color": [0, 0, 0],
     "image_anchor": 0.8
   },
-
   "duration": {
     "mode": "auto",
     "words_per_second": 2.0,
@@ -18,7 +16,6 @@
     "min_seconds": 7,
     "max_seconds": 15
   },
-
   "text": {
     "font": "/System/Library/Fonts/Supplemental/Optima.ttc",
     "font_index": 1,
@@ -32,96 +29,23 @@
     "shadow_opacity": 150,
     "scrim_opacity": 0
   },
-
   "audio": {
     "fade_in_seconds": 1.0,
     "fade_out_seconds": 1.5
   },
-
   "validation": {
     "enabled": true,
     "safe_margin_fraction": 0.05,
     "subject_luminance_threshold": 30,
     "subject_clearance_px": 24,
     "subject_overlap_tolerance_px": 200,
-    "min_contrast_ratio": 4.5,
-    "music_affinity_check": true,
-    "music_affinity_margin": 2,
-    "music_keywords": {
-      "nature": [
-        "earth",
-        "water",
-        "ocean",
-        "sea",
-        "river",
-        "rain",
-        "forest",
-        "tree",
-        "root",
-        "ground",
-        "season",
-        "sky",
-        "wind",
-        "mountain",
-        "nature",
-        "bloom",
-        "grow",
-        "tide",
-        "storm",
-        "soil",
-        "leaf",
-        "garden"
-      ],
-      "devotional": [
-        "divine",
-        "god",
-        "goddess",
-        "prayer",
-        "pray",
-        "sacred",
-        "temple",
-        "ritual",
-        "mantra",
-        "blessing",
-        "bless",
-        "devotion",
-        "worship",
-        "karma",
-        "dharma",
-        "chakra",
-        "guru",
-        "shiva",
-        "lakshmi",
-        "puja",
-        "diya",
-        "offering",
-        "surrender"
-      ],
-      "ambient": [
-        "rest",
-        "still",
-        "quiet",
-        "breathe",
-        "peace",
-        "calm",
-        "silence",
-        "pause",
-        "slow",
-        "sleep",
-        "dream",
-        "gentle",
-        "soften",
-        "linger"
-      ]
-    }
+    "min_contrast_ratio": 4.5
   },
-
   "retention": {
     "enabled": true,
     "days": 60,
     "keep_minimum": 10
   },
-
   "caption": {
     "hashtags": {
       "instagram": [

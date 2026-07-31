@@ -16,3 +16,7 @@ assets/music/**/*.mp3
 !assets/music/manifest.json
 
 .DS_Store
+
+# Quarantined vocal tracks and the metadata lookup cache — both regenerable.
+assets/music_quarantine/
+assets/music/.metadata_cache.json

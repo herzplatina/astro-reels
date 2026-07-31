@@ -166,37 +166,3 @@ def test_contrast_is_measured_only_under_the_glyphs(cfg):
     layer = _layer_with_text_at((300, 1000, 780, 1200))
     cfg["text"]["color"] = [20, 20, 20]
     assert validate_mod.check_contrast(layer, background, cfg) != []
-
-
-# ------------------------------------------------------------ music affinity
-
-
-def test_nature_text_over_a_nature_track_is_silent(cfg):
-    text = "The ocean and the river know the season; the forest waits for rain."
-    assert validate_mod.check_music_affinity(text, "nature", cfg) == []
-
-
-def test_nature_text_over_a_devotional_track_warns(cfg):
-    text = "The ocean and the river know the season; the forest waits for rain."
-    problems = validate_mod.check_music_affinity(text, "devotional", cfg)
-    assert [p.check for p in problems] == ["music-affinity"]
-    assert "nature" in problems[0].message
-
-
-def test_neutral_text_never_warns(cfg):
-    """No dominant signal means no opinion — this must not fire constantly."""
-    text = "Your birth chart is your subconscious mind."
-    for category in ("ambient", "nature", "devotional"):
-        assert validate_mod.check_music_affinity(text, category, cfg) == []
-
-
-def test_a_single_keyword_is_not_enough_to_warn(cfg):
-    """One incidental word must not override the random pick."""
-    text = "Let the rain be whatever it is."
-    assert validate_mod.check_music_affinity(text, "devotional", cfg) == []
-
-
-def test_the_affinity_check_can_be_switched_off(cfg):
-    cfg["validation"]["music_affinity_check"] = False
-    text = "The ocean and the river know the season; the forest waits for rain."
-    assert validate_mod.check_music_affinity(text, "devotional", cfg) == []
