@@ -5,7 +5,10 @@ __pycache__/
 *.pyc
 
 # OAuth tokens, credentials and personal identifiers — never commit these.
-secrets/
+# Ignore the contents rather than the directory: git does not descend into an
+# ignored directory, so `!secrets/credentials.example.json` would never match.
+secrets/*
+!secrets/credentials.example.json
 .env
 *.token.json
 *.local.md
@@ -20,3 +23,6 @@ assets/music/**/*.mp3
 # Quarantined vocal tracks and the metadata lookup cache — both regenerable.
 assets/music_quarantine/
 assets/music/.metadata_cache.json
+
+# Local checkout of the gh-pages hosting branch.
+.hosting/

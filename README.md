@@ -84,6 +84,43 @@ printed index, to listen through in a few minutes:
 python3 src/audit_music.py --preview
 ```
 
+## Publishing
+
+```bash
+python3 src/publish.py output/reel.mp4 --dry-run   # rehearse, no API calls
+python3 src/publish.py output/reel.mp4             # host, publish, clean up
+python3 src/publish.py --status                    # what is in flight
+python3 src/publish.py --retry <slug>              # retry only what failed
+```
+
+The video is pushed to GitHub Pages, published to all three platforms
+independently, and **removed from hosting only once all three confirm**. A
+partial success keeps it hosted so the failures can be retried against the same
+URL. State in `output/publish_state.json` means an interrupted run resumes
+instead of double-posting.
+
+Only Instagram needs the hosting — it exclusively fetches from a public URL,
+whereas YouTube and TikTok take the bytes directly.
+
+| Platform  | Ingest                     | Needs hosting? |
+| --------- | -------------------------- | -------------- |
+| Instagram | Fetches a public HTTPS URL | **Yes**        |
+| YouTube   | Resumable upload           | No             |
+| TikTok    | Chunked upload             | No             |
+
+Hosting uses an orphan `gh-pages` branch force-pushed as a single amended
+commit, so videos never enter git history — where they would live permanently
+and make the retention policy meaningless.
+
+Of the GitHub options, only Pages serves a correct `video/mp4`;
+`raw.githubusercontent.com` and Release assets both serve
+`application/octet-stream`. See `POSTING.md` for the measurements and for the
+approval status of each platform.
+
+Automated posting is gated behind platform approvals — all free, each with a
+queue. The API clients are written but **not yet exercised against the live
+APIs**; `--dry-run` is the tested path.
+
 ## Setup
 
 Requires `ffmpeg` and Python 3.11+ with Pillow.
@@ -101,7 +138,7 @@ The default `text.font` is a macOS path. On Linux or Windows the tool falls back
 to a bundled-serif search, but set `text.font` to something you actually like.
 
 ```bash
-python3 -m pytest tests/ -q    # 25 tests, no ffmpeg needed
+python3 -m pytest tests/ -q    # 93 tests, no ffmpeg or network needed
 ```
 
 ## Music licensing
@@ -120,20 +157,28 @@ The current settings are tuned for a **dark landscape** background image
 (contain-and-pad, no scrim, text in the upper third). Swapping in a brighter or
 portrait image means revisiting them — see `CLAUDE.md` for which and why.
 
-## Posting
+## Cost
 
-Video generation is free and works today. Automated _posting_ is gated behind
-platform approvals — all free, but each with a queue. `POSTING.md` has the
-roadmap, including one trap worth knowing: **YouTube uploads from an unaudited
-API project are permanently locked private, with no appeal.**
+Zero. ffmpeg, Python and the Openverse API are free; the music is CC0; GitHub
+Pages is free for public repos; and all three platform APIs have free tiers with
+no billing account attached. YouTube has no paid tier at all — its 10,000
+units/day is a rate limit, not a bill, and an upload costs ~1,600 units.
+
+One trap worth knowing: **YouTube uploads from an unaudited API project are
+permanently locked private, with no appeal.** See `POSTING.md`.
 
 ## Layout
 
 ```
 src/make_reel.py     render a reel
+src/validate.py      pre-flight checks on the composed frame
 src/fetch_music.py   build the CC0 music library
+src/audit_music.py   screen the library for human voices
+src/hosting.py       publish/unpublish on GitHub Pages
+src/platforms.py     Instagram, YouTube and TikTok clients
+src/publish.py       orchestrate publishing and publish-gated cleanup
 src/prune.py         age out old reels
 config.json          all tunable settings
 CLAUDE.md            project rules and design decisions
-POSTING.md           platform API approval roadmap
+POSTING.md           hosting rationale and platform approval status
 ```

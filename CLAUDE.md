@@ -36,6 +36,37 @@ H.264 output in `output/`.
 - **Keep 1080x1920 / 9:16.** All three platforms want the same shape, so one
   render serves all three. Do not add per-platform variants without a reason.
 
+## Publishing
+
+`src/publish.py` orchestrates; `src/hosting.py` handles GitHub Pages;
+`src/platforms.py` holds the three API clients.
+
+**The rule that governs everything: a video is removed from hosting only once
+all three platforms have confirmed publication.** Anything short of that keeps
+it hosted so the failures can be retried against the same URL. Do not "optimise"
+this into cleaning up after a partial success.
+
+- State is in `output/publish_state.json`. An interrupted run resumes; a
+  platform that already succeeded is never retried.
+- `--sweep` is a backstop only, for hosts stranded by a publish that never
+  completed. It is not the primary cleanup path.
+- Only **Instagram** needs hosting — it exclusively fetches from a public URL.
+  YouTube takes a resumable upload and TikTok a chunked upload. TikTok's
+  `PULL_FROM_URL` would need DNS-record domain verification, impossible on
+  `github.io`, so `FILE_UPLOAD` is used.
+
+Hosting lives on an **orphan `gh-pages` branch, force-pushed as a single amended
+commit**. Never commit videos to a normal branch: git history is permanent, so
+they would bloat the repo forever and contradict the retention policy. Verify
+with `git rev-list --count HEAD` in `.hosting/` — it must stay at 1.
+
+Only GitHub Pages serves `video/mp4`. `raw.githubusercontent.com` and Release
+assets both serve `application/octet-stream`, which with `nosniff` a fetcher
+cannot recover from. Tested; do not switch hosts without re-testing headers.
+
+The API clients are **untested against the live APIs** — approvals are pending.
+`--dry-run` is the tested path.
+
 ## Pre-flight checks
 
 `src/validate.py` runs on the composed frame before ffmpeg is invoked. Three
