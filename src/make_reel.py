@@ -24,6 +24,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from prune import prune_from_config
+from validate import validate
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -431,9 +432,32 @@ def pick_start_offset(track: Path, reel_duration: float) -> float:
     return round(random.uniform(0, slack), 2)
 
 
-def render(text: str, cfg: dict, duration: float, track: Track, out_path: Path) -> None:
+def render(
+    text: str,
+    cfg: dict,
+    duration: float,
+    track: Track,
+    out_path: Path,
+    force: bool = False,
+) -> None:
     background = prepare_background(cfg)
     text_layer = render_text_layer(text, cfg)
+
+    errors, warnings = validate(text, text_layer, background, cfg, track.category)
+    for warning in warnings:
+        print(warning.render(), file=sys.stderr)
+    if errors:
+        report = "\n".join(problem.render() for problem in errors)
+        if not force:
+            # The intermediate frames are left in place deliberately — opening
+            # output/.build/ shows exactly what tripped the check.
+            raise SystemExit(
+                f"This reel would not look right:\n{report}\n\n"
+                f"Fix the above, or re-run with --force to render it anyway.\n"
+                f"Inspect the frames at {BUILD_DIR}."
+            )
+        print(f"{report}\n  ! rendering anyway (--force).", file=sys.stderr)
+
     start_offset = pick_start_offset(track.path, duration)
 
     video = cfg["video"]
@@ -538,6 +562,11 @@ def main() -> int:
         "--seed", type=int, help="Seed the music pick, for reproducible runs."
     )
     parser.add_argument("--out", type=Path, help="Output path for the mp4.")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Render even if the pre-flight checks find problems.",
+    )
     args = parser.parse_args()
 
     if args.text_file:
@@ -560,7 +589,7 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = args.out or unique_output_path(OUTPUT_DIR, text)
 
-    render(text, cfg, duration, track, out_path)
+    render(text, cfg, duration, track, out_path, force=args.force)
     caption_path = write_captions(text, cfg, out_path)
 
     size_mb = out_path.stat().st_size / 1_048_576

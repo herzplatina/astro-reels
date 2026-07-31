@@ -27,6 +27,36 @@ H.264 output in `output/`.
 - **Keep 1080x1920 / 9:16.** All three platforms want the same shape, so one
   render serves all three. Do not add per-platform variants without a reason.
 
+## Pre-flight checks
+
+`src/validate.py` runs on the composed frame before ffmpeg is invoked. Three
+checks are **errors** that stop the render; one is a **warning**.
+
+Errors — measured from actual pixels, not estimated:
+
+- **overflow** — glyph bounding box must sit inside the safe area. The safe area
+  accounts for the zoom: at `zoom_amount` 1.06 the last frame shows only ~94% of
+  the canvas, so text can be safe at t=0 and cropped by the end. Never check
+  against the full canvas.
+- **subject-collision** — the glyph mask, dilated by `subject_clearance_px`, must
+  not intersect pixels brighter than `subject_luminance_threshold`. The subject
+  is found from the image itself, so this keeps working if the artwork changes.
+- **contrast** — WCAG ratio between `text.color` and the mean background
+  _under the glyphs only_, against `min_contrast_ratio` (4.5:1). Averaging the
+  whole frame would let a bright corner rescue unreadable text.
+
+Warning — **music-affinity**. A keyword heuristic, not comprehension. It only
+speaks up when one category beats the runner-up by `music_affinity_margin`, so
+an incidental word does not override the random pick. It cannot judge whether a
+track _sounds_ right; that judgement belongs to whoever reviews the reel.
+
+`--force` renders despite errors. On failure the intermediate frames are left in
+`output/.build/` on purpose — open them to see what tripped.
+
+Use `ImageStat` / `ImageChops` / `histogram()` for pixel statistics, never
+`getdata()` — it is deprecated in Pillow 14 and iterating 2M pixels in Python is
+orders of magnitude slower.
+
 ## Layout of the current background
 
 The image is a diya on near-black, 768x593 landscape. It is composed with

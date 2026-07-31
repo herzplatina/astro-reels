@@ -33,6 +33,34 @@ Roughly fifteen seconds per render, about 1 MB out.
   per platform.
 - **Prunes itself.** Reels older than 60 days are deleted after each render, but
   the newest 10 always survive.
+- **Refuses to render a broken reel.** Pre-flight checks run on the composed
+  frame before encoding starts.
+
+## Pre-flight checks
+
+The failure modes that matter here are all invisible until someone watches the
+finished video, so they are measured from the rendered pixels and block the
+render rather than warn after the fact.
+
+| Check               | Fails when                                                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `overflow`          | Glyphs fall outside the safe area — which shrinks to match the zoom, since text safe on the first frame can be cropped by the last |
+| `subject-collision` | Text lands on the lit subject, found by luminance rather than hardcoded coordinates                                                |
+| `contrast`          | WCAG ratio under the glyphs drops below 4.5:1                                                                                      |
+| `music-affinity`    | _(warning only)_ The text leans strongly toward a category the chosen track is not from                                            |
+
+```
+This reel would not look right:
+  ✗ overflow: text runs outside the safe area — 150px above the top edge
+    → Shorten the text, or lower text.max_size / raise text.max_height_fraction.
+```
+
+`--force` renders anyway. On failure the intermediate frames stay in
+`output/.build/` so you can see what tripped.
+
+The music check is a keyword heuristic, not comprehension — it catches a line
+about oceans landing on a sitar, and will miss subtler mismatches. It cannot
+judge whether a track _sounds_ right, which is why it warns rather than blocks.
 
 ## Setup
 
