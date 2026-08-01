@@ -282,7 +282,15 @@ def test_a_permanent_failure_is_not_retried(workspace, monkeypatch):
     assert attempted == [], "a permanent failure must not be retried automatically"
 
 
-def test_transient_failures_stop_after_the_attempt_ceiling(workspace, monkeypatch):
+def test_the_attempt_ceiling_is_five(workspace, monkeypatch):
+    """Pinned to a literal.
+
+    Reading MAX_ATTEMPTS on both sides of the assertion made it
+    self-referential: raising the constant to 50 kept the test green while the
+    retry loop hammered a broken platform ten times longer.
+    """
+    assert publish_mod.MAX_ATTEMPTS == 5
+
     video, _ = workspace
     _failing(
         monkeypatch,
@@ -292,11 +300,11 @@ def test_transient_failures_stop_after_the_attempt_ceiling(workspace, monkeypatc
             "tiktok": (True, False),
         },
     )
-    for _ in range(publish_mod.MAX_ATTEMPTS + 3):
+    for _ in range(8):
         publish_mod.run(video)
 
     entry = publish_mod.load_state()["a-reel"]
-    assert entry["platforms"]["instagram"]["attempts"] == publish_mod.MAX_ATTEMPTS
+    assert entry["platforms"]["instagram"]["attempts"] == 5
     assert "instagram" in publish_mod.blocked_platforms(entry)
 
 
@@ -352,10 +360,20 @@ def test_cleanup_still_happens_after_a_crash_before_unpublish(workspace, monkeyp
 
 
 def test_release_host_is_idempotent(workspace, monkeypatch):
+    """Counts the unpublish calls: a second release attempt is a force-push
+    against a file that is already gone."""
     video, hosted = workspace
+    calls: list[str] = []
+    monkeypatch.setattr(
+        publish_mod.hosting,
+        "unpublish",
+        lambda name: calls.append(name) or (hosted.pop(name, None) is not None),
+    )
     _failing(monkeypatch, {p: (True, False) for p in publish_mod.PLATFORMS})
     publish_mod.run(video)
     publish_mod.run(video)
+    publish_mod.run(video)
+    assert calls == [video.name]
     assert hosted == {}
 
 
@@ -377,16 +395,25 @@ def test_abandon_releases_a_permanently_stuck_reel(workspace, monkeypatch):
 
 
 def test_sweep_ignores_an_abandoned_reel(workspace, monkeypatch):
-    video, hosted = workspace
+    """`abandoned` must be the deciding condition. Abandoning also sets
+    cleaned_up, which was the flag actually doing the skipping — so removing the
+    abandoned guard changed nothing."""
+    video, _ = workspace
     _failing(monkeypatch, {p: (False, True) for p in publish_mod.PLATFORMS})
     publish_mod.run(video)
     publish_mod.abandon("a-reel")
 
     state = publish_mod.load_state()
+    state["a-reel"]["cleaned_up"] = False  # only `abandoned` can skip it now
     state["a-reel"]["hosted_at"] = "2000-01-01T00:00:00+00:00"
     publish_mod.save_state(state)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        publish_mod.hosting, "unpublish", lambda name: calls.append(name) or True
+    )
     publish_mod.sweep()
-    assert publish_mod.load_state()["a-reel"]["abandoned"]
+    assert calls == [], "an abandoned reel must not be swept again"
 
 
 def test_explicit_retry_clears_a_permanent_block(workspace, monkeypatch):
@@ -426,14 +453,28 @@ def test_only_never_reposts_an_already_published_platform(workspace, monkeypatch
     assert attempted == []
 
 
-def test_state_is_written_atomically(workspace):
-    """A crash mid-write must never leave a half-parsed history behind."""
-    video, _ = workspace
-    state = {"x": {"platforms": {}}}
-    publish_mod.save_state(state)
-    assert publish_mod.STATE_PATH.exists()
-    assert not publish_mod.STATE_PATH.with_suffix(".tmp").exists()
-    assert publish_mod.load_state() == state
+def test_state_is_written_atomically(workspace, monkeypatch):
+    """Injects the crash rather than assuming it. A plain truncating write
+    passes a round-trip check, so only a real failure mid-write discriminates.
+    """
+    good = {"kept": {"platforms": {}}}
+    publish_mod.save_state(good)
+
+    real_dump = publish_mod.json.dump
+
+    def explode(obj, fh, **kwargs):
+        fh.write('{"half wri')
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(publish_mod.json, "dump", explode)
+    with pytest.raises(OSError):
+        publish_mod.save_state({"new": {}})
+    monkeypatch.setattr(publish_mod.json, "dump", real_dump)
+
+    # The previous good state must still be intact and parseable.
+    assert publish_mod.load_state() == good
+    leftovers = list(publish_mod.STATE_PATH.parent.glob("*.tmp"))
+    assert leftovers == [], f"temp files left behind: {leftovers}"
 
 
 def test_a_corrupt_state_file_is_preserved_not_discarded(workspace, capsys):
@@ -667,3 +708,75 @@ def test_typing_publish_proceeds(tmp_path, monkeypatch):
 def test_yes_flag_skips_the_prompt(tmp_path):
     video = tmp_path / "a-reel.mp4"
     assert publish_mod.confirm_approval(video, ["instagram"], assume_yes=True) is None
+
+
+# ----------------------------------------- publish_one, without the stub in place
+
+
+def test_missing_credentials_are_classified_permanent(workspace, monkeypatch):
+    """Every orchestration test stubs publish_one wholesale, so the classification
+    that gates the whole retry loop was never exercised."""
+    video, _ = workspace
+    monkeypatch.setattr(
+        publish_mod,
+        "publish_instagram",
+        lambda *a, **k: (_ for _ in ()).throw(
+            publish_mod.CredentialsMissing("no token")
+        ),
+    )
+    result = publish_mod.publish_one("instagram", video, "https://h/x", dry_run=False)
+    assert not result.ok
+    assert result.permanent, "an absent token is not something a retry fixes"
+
+
+def test_an_unexpected_error_is_classified_transient(workspace, monkeypatch):
+    video, _ = workspace
+    monkeypatch.setattr(
+        publish_mod,
+        "publish_youtube",
+        lambda *a, **k: (_ for _ in ()).throw(TimeoutError("socket timed out")),
+    )
+    result = publish_mod.publish_one("youtube", video, "https://h/x", dry_run=False)
+    assert not result.ok
+    assert not result.permanent
+    assert "TimeoutError" in result.error
+
+
+def test_publish_one_dispatches_to_the_right_client(workspace, monkeypatch):
+    video, _ = workspace
+    seen: list[str] = []
+    monkeypatch.setattr(
+        publish_mod,
+        "publish_instagram",
+        lambda url, caption: seen.append("ig") or PublishResult(True, post_id="i"),
+    )
+    monkeypatch.setattr(
+        publish_mod,
+        "publish_youtube",
+        lambda v, t, d: seen.append("yt") or PublishResult(True, post_id="y"),
+    )
+    monkeypatch.setattr(
+        publish_mod,
+        "publish_tiktok",
+        lambda v, c: seen.append("tt") or PublishResult(True, post_id="t"),
+    )
+    for platform in publish_mod.PLATFORMS:
+        publish_mod.publish_one(platform, video, "https://h/x", dry_run=False)
+    assert seen == ["ig", "yt", "tt"]
+
+
+def test_an_unknown_platform_is_reported(workspace):
+    video, _ = workspace
+    result = publish_mod.publish_one("myspace", video, "https://h/x", dry_run=False)
+    assert not result.ok and "unknown platform" in result.error
+
+
+def test_dry_run_makes_no_client_call(workspace, monkeypatch):
+    video, _ = workspace
+    for name in ("publish_instagram", "publish_youtube", "publish_tiktok"):
+        monkeypatch.setattr(
+            publish_mod,
+            name,
+            lambda *a, **k: pytest.fail("a dry run must not reach a client"),
+        )
+    assert publish_mod.publish_one("instagram", video, "https://h/x", dry_run=True).ok

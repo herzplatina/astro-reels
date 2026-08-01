@@ -41,6 +41,25 @@ def _flat(colour: tuple[int, int, int]) -> Image.Image:
     return Image.new("RGB", FRAME, colour)
 
 
+def test_the_text_mask_excludes_the_blurred_shadow(cfg):
+    """Every other fixture uses alpha 0 or 255, so the threshold that separates
+    glyphs from their shadow is otherwise untested — and lowering it to 1 went
+    undetected."""
+    from PIL import ImageFilter
+
+    layer = Image.new("RGBA", FRAME, (0, 0, 0, 0))
+    glyphs = (400, 900, 680, 1000)
+    shadow = Image.new("RGBA", FRAME, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rectangle(glyphs, fill=(0, 0, 0, 150))
+    layer = Image.alpha_composite(layer, shadow.filter(ImageFilter.GaussianBlur(30)))
+    ImageDraw.Draw(layer).rectangle(glyphs, fill=(255, 255, 255, 255))
+
+    bbox = validate_mod._text_mask(layer).getbbox()
+    # The blur spreads well beyond the glyphs; the mask must not follow it.
+    assert bbox[0] >= glyphs[0] - 2 and bbox[1] >= glyphs[1] - 2
+    assert bbox[2] <= glyphs[2] + 2 and bbox[3] <= glyphs[3] + 2
+
+
 # ------------------------------------------------------------ contrast maths
 
 
@@ -133,6 +152,24 @@ def test_text_over_the_lit_subject_is_caught(cfg):
     assert [p.check for p in problems] == ["subject-collision"]
 
 
+def test_text_merely_crowding_the_subject_is_caught(cfg):
+    """The clearance buffer is the point: text 12px from the flame reads as
+    touching it. A test that only places text directly on top would pass with
+    the dilation removed entirely."""
+    background = _flat((0, 0, 0))
+    ImageDraw.Draw(background).rectangle((300, 1420, 780, 1700), fill=(255, 200, 80))
+    near = _layer_with_text_at((300, 1200, 780, 1408))  # 12px gap, no overlap
+
+    from PIL import ImageChops
+
+    subject = background.convert("L").point(lambda v: 255 if v > 30 else 0)
+    raw = validate_mod._text_mask(near)
+    assert ImageChops.multiply(subject, raw).histogram()[255] == 0, "must not overlap"
+
+    problems = validate_mod.check_subject_collision(near, background, cfg)
+    assert [p.check for p in problems] == ["subject-collision"]
+
+
 def test_a_wholly_dark_background_has_no_subject_to_collide_with(cfg):
     layer = _layer_with_text_at((300, 800, 780, 1000))
     assert validate_mod.check_subject_collision(layer, _flat((0, 0, 0)), cfg) == []
@@ -160,9 +197,54 @@ def test_white_text_on_mid_grey_is_caught(cfg):
 
 
 def test_contrast_is_measured_only_under_the_glyphs(cfg):
-    """A bright patch elsewhere in the frame must not rescue dark-on-dark text."""
-    background = _flat((10, 10, 10))
-    ImageDraw.Draw(background).rectangle((0, 0, 1080, 600), fill=(255, 255, 255))
-    layer = _layer_with_text_at((300, 1000, 780, 1200))
-    cfg["text"]["color"] = [20, 20, 20]
-    assert validate_mod.check_contrast(layer, background, cfg) != []
+    """The two behaviours must land on opposite sides of the threshold.
+
+    Chosen so a whole-frame average would PASS (the frame is mostly black, so
+    white text looks high-contrast) while the pixels actually under the glyphs
+    are white and therefore illegible. A fixture where both readings fail proves
+    nothing — the earlier version of this test passed even with the measurement
+    replaced by a whole-frame average.
+    """
+    background = _flat((0, 0, 0))
+    box = (300, 1000, 780, 1200)
+    ImageDraw.Draw(background).rectangle(box, fill=(255, 255, 255))
+    layer = _layer_with_text_at(box)
+    cfg["text"]["color"] = [255, 255, 255]
+
+    from PIL import ImageStat
+
+    mask = validate_mod._text_mask(layer)
+    under = tuple(ImageStat.Stat(background, mask).mean)
+    whole = tuple(ImageStat.Stat(background).mean)
+    assert validate_mod.contrast_ratio((255, 255, 255), under) < 4.5
+    assert validate_mod.contrast_ratio((255, 255, 255), whole) > 4.5
+
+    assert [p.check for p in validate_mod.check_contrast(layer, background, cfg)] == [
+        "contrast"
+    ]
+
+
+def test_the_safe_margin_keeps_text_off_the_frame_edge(cfg):
+    """Nothing pinned safe_margin_fraction, so ignoring it went undetected.
+
+    Sits inside the zoom-visible region but inside the margin, so only the
+    margin can reject it.
+    """
+    left, top, right, bottom = validate_mod.visible_region(FRAME, 1.06)
+    fraction = cfg["validation"]["safe_margin_fraction"]
+    margin_x = round(FRAME[0] * fraction)
+    margin_y = round(FRAME[1] * fraction)  # derived from height, not width
+    assert margin_x > 0 and margin_y > 0
+
+    top_y = top + margin_y + 20
+    breaching = _layer_with_text_at(
+        (left + 2, top_y, right - margin_x - 20, top_y + 80)
+    )
+    problems = validate_mod.check_overflow(breaching, cfg, 1.06)
+    assert [p.check for p in problems] == ["overflow"]
+    assert "left" in problems[0].message
+
+    clear = _layer_with_text_at(
+        (left + margin_x + 5, top_y, right - margin_x - 20, top_y + 80)
+    )
+    assert validate_mod.check_overflow(clear, cfg, 1.06) == []

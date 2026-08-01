@@ -208,3 +208,26 @@ Do not reintroduce these:
   a query string reaches exception text, the terminal, and `publish_state.json`.
 - **Config values that reach the ffmpeg filtergraph are coerced numerically** at
   `load_config()`, and only `.mp4` may be handed to `hosting.push`.
+
+## Test rigour
+
+The suite is checked by mutation, not by count. Seed a defect into `src/`, run
+the suite, and it must fail — 30 seeded defects, 30 caught. Re-run that check
+after changing tests, because a test can go green for the wrong reason:
+
+- Fixtures must **discriminate**. A contrast test where both the correct and
+  the broken reading fail proves nothing; pick values that land on opposite
+  sides of the threshold.
+- Assert **which**, not just how many. "Keep the newest 3" and "keep the oldest
+  3" produce identical counts.
+- Never read a constant on both sides of an assertion — `MAX_ATTEMPTS == 5`
+  pinned to a literal, or raising the constant goes undetected.
+- A test named for a scenario must **create** that scenario. Two texts that
+  "collide" must actually produce the same slug.
+- Stubbing the unit under test tests the stub. `publish_one` is stubbed by every
+  orchestration test, so its failure classification needs direct tests.
+
+`tests/test_hosting.py` drives real git against a bare repo in a tmp dir, which
+is why it carries the `allow_network` marker. It is the only thing that pins the
+orphan/`--amend`/`gh-pages` invariants; without it, pointing `BRANCH` at `main`
+passed every test.

@@ -22,6 +22,14 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "allow_network: opt out of the hosting/network interlock. Only for tests "
+        "that drive git against a local bare repo in a tmp dir.",
+    )
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch, request):
     """Make any unstubbed outbound call an obvious test failure."""

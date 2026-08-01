@@ -85,9 +85,14 @@ def test_slugify_never_returns_empty():
 
 
 def test_differing_texts_with_a_shared_opening_do_not_collide(tmp_path):
-    """The slug is truncated, so long shared prefixes must not overwrite."""
+    """Texts that genuinely collide at the 40-char truncation.
+
+    The earlier pair diverged before character 40, so their slugs already
+    differed and the collision branch was never entered at all.
+    """
     a = "Today's guidance is to rest and let the answers arrive on their own."
-    b = "Today's guidance is to move, because waiting has become avoidance."
+    b = "Today's guidance is to rest and let the world keep turning without you."
+    assert make_reel.slugify(a) == make_reel.slugify(b), "must actually collide"
 
     first = make_reel.unique_output_path(tmp_path, a)
     first.touch()
@@ -207,13 +212,20 @@ def test_prune_deletes_the_caption_alongside_the_reel(output_dir):
 
 
 def test_keep_minimum_protects_the_newest_regardless_of_age(output_dir):
+    """Asserts WHICH files survive, not just how many.
+
+    Counting alone cannot tell "keep the newest 3" from "keep the oldest 3", so
+    reversing the sort — which would delete your most recent reels — went
+    undetected.
+    """
     for i in range(5):
-        _reel(output_dir, f"ancient-{i}", age_days=365 + i)
+        _reel(output_dir, f"age-{i}", age_days=365 + i)  # age-0 newest, age-4 oldest
 
     removed, _ = prune_mod.prune(days=60, keep_minimum=3)
 
-    assert len(removed) == 2
-    assert len(list(output_dir.glob("*.mp4"))) == 3
+    assert sorted(p.stem for p in removed) == ["age-3", "age-4"]
+    survivors = sorted(p.stem for p in output_dir.glob("*.mp4"))
+    assert survivors == ["age-0", "age-1", "age-2"]
 
 
 def test_dry_run_reports_without_deleting(output_dir):
@@ -245,3 +257,21 @@ def test_a_text_that_is_a_prefix_of_another_does_not_overwrite_it(tmp_path):
 
     second = make_reel.unique_output_path(tmp_path, shorter)
     assert second != first
+
+
+def test_fit_text_actually_steps_down_through_intermediate_sizes(cfg):
+    """Asserts an intermediate size, not merely "smaller".
+
+    Disabling the shrink loop still produced a smaller font for long text,
+    because control fell through to the min_size fallback — so a test comparing
+    long-vs-short passed with the loop entirely broken.
+    """
+    canvas = (cfg["video"]["width"], cfg["video"]["height"])
+    largest = cfg["text"]["max_size"]
+    smallest = cfg["text"]["min_size"]
+
+    for words in range(4, 40, 2):
+        font, _ = make_reel.fit_text(" ".join(["word"] * words), cfg, canvas)
+        if smallest < font.size < largest:
+            return
+    pytest.fail("no text length produced a size between min_size and max_size")
