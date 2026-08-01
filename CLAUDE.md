@@ -231,3 +231,25 @@ after changing tests, because a test can go green for the wrong reason:
 is why it carries the `allow_network` marker. It is the only thing that pins the
 orphan/`--amend`/`gh-pages` invariants; without it, pointing `BRANCH` at `main`
 passed every test.
+
+## The live publish flow is tested against real git
+
+`tests/test_publish_integration.py` runs `publish.run()` with hosting **not**
+mocked — a real bare repo in a tmp dir, with only the three platform clients
+stubbed. Keep it that way. Every other publish test stubs `hosting` wholesale,
+so the seam between the two modules is only exercised here, and that seam is
+where the leaks live: the first thing this file caught was a video staying
+public forever after `--sweep` released it and a later run re-hosted it.
+
+What it pins, because hosting is public, force-pushed storage:
+
+- Twenty publish cycles leave `reels/` empty and the branch at depth 1.
+- Repeated failures host each reel once, not once per attempt.
+- The local `.hosting` clone does not grow across cycles.
+- `ensure_clone`'s fetch-and-reset is load-bearing: the branch is force-pushed
+  onto an amended commit, so a stale clone would silently delete a video another
+  run had hosted and that was still awaiting a retry.
+
+`--dry-run` must never touch git or state. `wait_until_live` is the only thing
+stubbed in that file besides the platforms, because GitHub's CDN cannot be stood
+up locally.

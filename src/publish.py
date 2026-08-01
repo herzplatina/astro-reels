@@ -346,6 +346,13 @@ def run(
     # Host first. Instagram cannot publish without a public URL, and hosting
     # once for all retries keeps the URL stable.
     if not entry["hosted_url"]:
+        # `cleaned_up` describes the file currently on the branch, so hosting
+        # afresh must clear it. A reel released by --sweep and later re-hosted
+        # would otherwise keep the stale True, and release_host would return
+        # early when the platforms finally confirmed — leaving the new file
+        # public with nothing left that would ever remove it.
+        entry["cleaned_up"] = False
+
         if dry_run:
             entry["hosted_url"] = hosting.public_url(video.name)
             entry["hosted_at"] = _now()

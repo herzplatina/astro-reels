@@ -41,6 +41,10 @@ def remote(tmp_path, monkeypatch):
     origin = tmp_path / "origin.git"
     origin.mkdir()
     git("init", "--bare", "--initial-branch=main", cwd=origin)
+    # hosting clones with --depth 1, and a bare repo rejects a shallow push by
+    # default. GitHub accepts one, so match that rather than deepening the
+    # clone and testing a flow we do not run.
+    git("config", "receive.shallowUpdate", "true", cwd=origin)
 
     seed = tmp_path / "seed"
     seed.mkdir()
@@ -221,3 +225,151 @@ def test_an_unparseable_remote_is_reported(monkeypatch):
 def test_public_url_places_files_under_the_reels_path(monkeypatch):
     monkeypatch.setattr(hosting, "remote_url", lambda: "https://github.com/o/r.git")
     assert hosting.public_url("x.mp4") == "https://o.github.io/r/reels/x.mp4"
+
+
+# ------------------------------------------------- availability polling
+
+
+def test_wait_until_live_returns_once_the_file_serves(monkeypatch):
+    """publish.py blocks on this before handing the URL to Instagram."""
+    attempts = {"n": 0}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=15):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise OSError("404 while the Pages build runs")
+        return Response()
+
+    monkeypatch.setattr(hosting.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(hosting.time, "sleep", lambda s: None)
+
+    assert hosting.wait_until_live("https://x/y.mp4", timeout=60) is True
+    assert attempts["n"] == 3, "must keep polling rather than give up on the first 404"
+
+
+def test_wait_until_live_gives_up_rather_than_hanging(monkeypatch):
+    monkeypatch.setattr(
+        hosting.urllib.request,
+        "urlopen",
+        lambda request, timeout=15: (_ for _ in ()).throw(OSError("still 404")),
+    )
+    monkeypatch.setattr(hosting.time, "sleep", lambda s: None)
+    assert hosting.wait_until_live("https://x/y.mp4", timeout=0) is False
+
+
+def test_a_non_200_is_not_treated_as_live(monkeypatch):
+    class Response:
+        status = 403
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        hosting.urllib.request, "urlopen", lambda request, timeout=15: Response()
+    )
+    monkeypatch.setattr(hosting.time, "sleep", lambda s: None)
+    assert hosting.wait_until_live("https://x/y.mp4", timeout=0) is False
+
+
+# ----------------------------------------- pushing the same file twice
+
+
+def test_re_pushing_an_identical_file_still_leaves_it_hosted(remote, tmp_path):
+    """`_commit_and_push` short-circuits when nothing changed.
+
+    That is correct, but push() returns the URL either way — so this pins that
+    the file really is on the branch after a no-op push, rather than the caller
+    being told it is hosted when it never was.
+    """
+    video = tmp_path / "reel.mp4"
+    video.write_bytes(b"identical bytes")
+
+    first = hosting.push(video)
+    second = hosting.push(video)  # byte-identical: no commit is made
+
+    assert first == second
+    assert "reels/reel.mp4" in branch_files(remote, "gh-pages")
+    assert branch_depth(remote, "gh-pages") == 1
+
+
+def test_a_git_failure_is_surfaced_not_swallowed(remote, tmp_path, monkeypatch):
+    """A push that fails must raise, never report success for an unhosted file."""
+    video = tmp_path / "reel.mp4"
+    video.write_bytes(b"x")
+    hosting.ensure_clone()
+
+    import subprocess as sp
+
+    real_run = sp.run
+
+    def failing(args, **kwargs):
+        if args[:2] == ["git", "push"]:
+            return sp.CompletedProcess(args, 1, "", "remote rejected")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(hosting.subprocess, "run", failing)
+    with pytest.raises(hosting.HostingError) as caught:
+        hosting.push(video)
+    assert "remote rejected" in str(caught.value)
+    assert "reels/reel.mp4" not in branch_files(remote, "gh-pages")
+
+
+def test_the_clone_is_reused_and_resynced_across_runs(remote, tmp_path):
+    """Real runs reuse a persistent clone; only the first call clones fresh."""
+    video = tmp_path / "reel.mp4"
+    video.write_bytes(b"x")
+    hosting.push(video)
+    marker = hosting.CLONE / "stray.txt"
+    marker.write_text("left over from an interrupted run")
+
+    hosting.push(video)
+    assert not marker.exists(), "ensure_clone must reset the working copy"
+
+
+def test_a_stale_clone_does_not_clobber_what_another_run_hosted(remote, tmp_path):
+    """`ensure_clone` resyncs before amending, and that is load-bearing.
+
+    The branch is force-pushed onto an amended commit, so if the local clone is
+    behind, the push overwrites whatever the remote gained in the meantime. That
+    would silently delete a video still awaiting a retry — the one thing the
+    publish-gated design exists to prevent.
+    """
+    first = tmp_path / "first.mp4"
+    first.write_bytes(b"x")
+    hosting.push(first)
+
+    # Something else hosts a video: another machine, or a run whose clone is
+    # elsewhere. The local clone knows nothing about it.
+    other = tmp_path / "other-clone"
+    git("clone", "--branch", "gh-pages", str(remote), str(other), cwd=tmp_path)
+    git("config", "user.email", "o@o", cwd=other)
+    git("config", "user.name", "o", cwd=other)
+    (other / "reels").mkdir(exist_ok=True)
+    (other / "reels" / "elsewhere.mp4").write_bytes(b"y")
+    git("add", "-A", cwd=other)
+    git("commit", "--amend", "-m", "host elsewhere.mp4", cwd=other)
+    git("push", "--force", "origin", "gh-pages", cwd=other)
+    assert "reels/elsewhere.mp4" in branch_files(remote, "gh-pages")
+
+    # Now publish through the stale local clone.
+    third = tmp_path / "third.mp4"
+    third.write_bytes(b"z")
+    hosting.push(third)
+
+    hosted = branch_files(remote, "gh-pages")
+    assert "reels/third.mp4" in hosted
+    assert "reels/elsewhere.mp4" in hosted, (
+        "a stale clone force-pushed over a video another run had hosted"
+    )
