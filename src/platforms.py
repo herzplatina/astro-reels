@@ -53,19 +53,31 @@ class CredentialsMissing(RuntimeError):
     pass
 
 
+# Only these are required. Checking "every key present is non-empty" would fail
+# on optional settings like tiktok.privacy_level being left blank.
+REQUIRED_CREDENTIALS = {
+    "instagram": ("access_token", "ig_user_id"),
+    "youtube": ("client_id", "client_secret", "refresh_token"),
+    "tiktok": ("access_token",),
+}
+
+
 def load_credentials(platform: str) -> dict:
     if not CREDENTIALS.exists():
         raise CredentialsMissing(
             f"No credentials at {CREDENTIALS}.\n"
             "Copy secrets/credentials.example.json and fill it in."
         )
-    data = json.loads(CREDENTIALS.read_text())
+    try:
+        data = json.loads(CREDENTIALS.read_text())
+    except json.JSONDecodeError as exc:
+        raise CredentialsMissing(f"{CREDENTIALS} is not valid JSON: {exc}") from exc
+
     section = data.get(platform) or {}
-    missing = [k for k, v in section.items() if not v]
-    if not section or missing:
+    missing = [k for k in REQUIRED_CREDENTIALS.get(platform, ()) if not section.get(k)]
+    if missing:
         raise CredentialsMissing(
-            f"{platform}: credentials absent or incomplete "
-            f"({', '.join(missing) or 'section empty'})."
+            f"{platform}: missing {', '.join(missing)} in {CREDENTIALS.name}."
         )
     return section
 

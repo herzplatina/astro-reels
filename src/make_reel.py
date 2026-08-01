@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from media import probe_duration, require_tools
 from prune import prune_from_config
 from validate import validate
 
@@ -397,27 +398,6 @@ def unique_output_path(directory: Path, text: str) -> Path:
     return candidate
 
 
-def probe_duration(path: Path) -> float:
-    proc = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    try:
-        return float(proc.stdout.strip())
-    except ValueError:
-        return 0.0
-
-
 def pick_start_offset(track: Path, reel_duration: float) -> float:
     """Choose a random window inside the track rather than always starting at 0:00.
 
@@ -567,7 +547,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    require_tools()
+
     if args.text_file:
+        if not args.text_file.is_file():
+            raise SystemExit(f"No such text file: {args.text_file}")
         text = args.text_file.read_text().strip()
     elif args.text:
         text = args.text.strip()
@@ -586,6 +570,9 @@ def main() -> int:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = args.out or unique_output_path(OUTPUT_DIR, text)
+    # ffmpeg will not create a missing parent, and its error for that names the
+    # file rather than the directory, which reads as a permissions problem.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     render(text, cfg, duration, track, out_path, force=args.force)
     caption_path = write_captions(text, cfg, out_path)

@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
+import sys
 from pathlib import Path
 
 import hosting
@@ -59,40 +61,76 @@ def load_state() -> dict:
     try:
         return json.loads(STATE_PATH.read_text())
     except json.JSONDecodeError:
+        # Losing this file means forgetting what was already published, which on
+        # the next run means posting it all again. Keep the wreckage and say so
+        # loudly rather than starting from scratch in silence.
+        salvage = STATE_PATH.with_name(
+            f"{STATE_PATH.stem}.corrupt-{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.json"
+        )
+        STATE_PATH.rename(salvage)
+        print(
+            f"  ! publish state was unreadable and has been moved to {salvage.name}.\n"
+            f"    Treating history as empty — check that file before publishing "
+            f"anything, or a reel may be posted twice.",
+            file=sys.stderr,
+        )
         return {}
 
 
 def save_state(state: dict) -> None:
+    """Write atomically: a partial write here would erase the publish history."""
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2))
+    tmp = STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    os.replace(tmp, STATE_PATH)  # atomic on POSIX; never a half-written file
 
 
 def entry_for(state: dict, video: Path) -> dict:
     slug = video.stem
     if slug not in state:
         state[slug] = {
-            "file": str(video.relative_to(ROOT)) if video.is_absolute() else str(video),
+            "file": _record_path(video),
             "hosted_url": "",
             "hosted_at": "",
             "platforms": {p: {"status": "pending"} for p in PLATFORMS},
             "cleaned_up": False,
         }
-    return state[slug]
+
+    # Fill in anything an older state file predates, so a schema change never
+    # turns into a KeyError halfway through a publish.
+    entry = state[slug]
+    entry.setdefault("hosted_url", "")
+    entry.setdefault("hosted_at", "")
+    entry.setdefault("cleaned_up", False)
+    entry.setdefault("platforms", {})
+    for platform in PLATFORMS:
+        entry["platforms"].setdefault(platform, {"status": "pending"})
+    return entry
+
+
+def _record_path(video: Path) -> str:
+    """Store a repo-relative path when possible, an absolute one otherwise.
+
+    `--out` accepts any destination, and relative_to() raises for anything
+    outside the repo — which would crash before a single platform was tried.
+    """
+    if not video.is_absolute():
+        return str(video)
+    try:
+        return str(video.relative_to(ROOT))
+    except ValueError:
+        return str(video)
 
 
 def all_published(entry: dict) -> bool:
-    return all(
-        entry["platforms"].get(p, {}).get("status") == "published" for p in PLATFORMS
-    )
+    platforms = entry.get("platforms", {})
+    return all(platforms.get(p, {}).get("status") == "published" for p in PLATFORMS)
 
 
 def pending_platforms(entry: dict) -> list[str]:
     """Everything not yet published, regardless of why."""
-    return [
-        p
-        for p in PLATFORMS
-        if entry["platforms"].get(p, {}).get("status") != "published"
-    ]
+    platforms = entry.get("platforms", {})
+    return [p for p in PLATFORMS if platforms.get(p, {}).get("status") != "published"]
 
 
 def blocked_platforms(entry: dict) -> list[str]:
@@ -103,7 +141,7 @@ def blocked_platforms(entry: dict) -> list[str]:
     """
     blocked = []
     for platform in pending_platforms(entry):
-        record = entry["platforms"].get(platform, {})
+        record = entry.get("platforms", {}).get(platform, {})
         if record.get("permanent") or record.get("attempts", 0) >= MAX_ATTEMPTS:
             blocked.append(platform)
     return blocked
@@ -121,7 +159,7 @@ def release_host(entry: dict, video: Path, dry_run: bool, reason: str) -> None:
     successful publish and this call would otherwise strand the file publicly
     with no route back, since a later run would find nothing left to publish.
     """
-    if entry["cleaned_up"]:
+    if entry.get("cleaned_up"):
         return
     if dry_run:
         print(f"  would remove from hosting ({reason})")
@@ -163,7 +201,12 @@ def publish_one(platform: str, video: Path, url: str, dry_run: bool) -> PublishR
         if platform == "instagram":
             return publish_instagram(url, caption)
         if platform == "youtube":
-            title = caption.split("\n")[0][:100]
+            # YouTube rejects an empty title outright, and a caption whose first
+            # line is blank would produce one.
+            first_line = next(
+                (line for line in caption.splitlines() if line.strip()), ""
+            )
+            title = (first_line or video.stem.replace("-", " "))[:100]
             return publish_youtube(video, title, caption)
         if platform == "tiktok":
             return publish_tiktok(video, caption)
@@ -180,7 +223,16 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
     state = load_state()
     entry = entry_for(state, video)
 
-    targets = only or retryable_platforms(entry)
+    # An explicit --only must still never re-post somewhere that already
+    # succeeded; the platform has no idea it is a repeat and would publish twice.
+    outstanding = set(pending_platforms(entry))
+    if only:
+        already = [p for p in only if p not in outstanding]
+        if already:
+            print(f"  skipping {', '.join(already)} — already published")
+        targets = [p for p in only if p in outstanding]
+    else:
+        targets = retryable_platforms(entry)
 
     # Nothing left to attempt. This branch must still reach the cleanup, because
     # a crash after the final publish but before the unpublish lands here on the
@@ -210,12 +262,27 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
     if not entry["hosted_url"]:
         if dry_run:
             entry["hosted_url"] = hosting.public_url(video.name)
+            entry["hosted_at"] = _now()
             print(f"  would host at {entry['hosted_url']}")
         else:
             print(f"  hosting {video.name}...")
-            entry["hosted_url"] = hosting.publish(video)
+            # Record the URL the moment the file is public, before waiting on
+            # the Pages build. A timeout after this point leaves a file that
+            # cleanup and --sweep can still find; recording afterwards would
+            # orphan it with no record anywhere.
+            entry["hosted_url"] = hosting.push(video)
+            entry["hosted_at"] = _now()
+            save_state(state)
+
+            if not hosting.wait_until_live(entry["hosted_url"]):
+                save_state(state)
+                raise SystemExit(
+                    f"  {entry['hosted_url']} did not start serving within "
+                    f"{hosting.AVAILABILITY_TIMEOUT_S}s.\n"
+                    f"  The file IS hosted and recorded — re-run to continue, or "
+                    f"--abandon {video.stem} to release it."
+                )
             print(f"  hosted at {entry['hosted_url']}")
-        entry["hosted_at"] = _now()
         save_state(state)
 
     for platform in targets:
@@ -290,13 +357,13 @@ def show_status() -> int:
 
     needs_attention = []
     for slug, entry in sorted(state.items()):
+        platforms = entry.get("platforms", {})
         flags = " ".join(
-            f"{p[:2]}:{entry['platforms'].get(p, {}).get('status', '?')[:4]}"
-            for p in PLATFORMS
+            f"{p[:2]}:{platforms.get(p, {}).get('status', '?')[:4]}" for p in PLATFORMS
         )
         if entry.get("abandoned"):
             host = "abandoned"
-        elif entry["cleaned_up"]:
+        elif entry.get("cleaned_up"):
             host = "released"
         else:
             host = "HOSTED"
@@ -329,12 +396,22 @@ def sweep(dry_run: bool = False) -> int:
     released = 0
 
     for slug, entry in state.items():
-        if entry["cleaned_up"] or entry.get("abandoned") or not entry["hosted_at"]:
+        if entry.get("cleaned_up") or entry.get("abandoned"):
             continue
-        if dt.datetime.fromisoformat(entry["hosted_at"]) > cutoff:
+        hosted_at = entry.get("hosted_at")
+        if not hosted_at:
+            continue
+        try:
+            when = dt.datetime.fromisoformat(hosted_at)
+        except ValueError:
+            # An unparseable timestamp must not stop the sweep reaching the rest
+            # of the list; treat it as old enough to deal with.
+            print(f"  ! {slug}: unreadable hosted_at {hosted_at!r}, releasing anyway")
+            when = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        if when > cutoff:
             continue
 
-        name = Path(entry["file"]).name
+        name = Path(entry.get("file", slug)).name
         remaining = ", ".join(pending_platforms(entry))
         print(
             f"  {'would release' if dry_run else 'released'} {name} "

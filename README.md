@@ -149,7 +149,7 @@ The default `text.font` is a macOS path. On Linux or Windows the tool falls back
 to a bundled-serif search, but set `text.font` to something you actually like.
 
 ```bash
-python3 -m pytest tests/ -q    # 102 tests, no ffmpeg or network needed
+python3 -m pytest tests/ -q    # 116 tests, no ffmpeg or network needed
 ```
 
 ## Music licensing
@@ -189,6 +189,7 @@ src/hosting.py       publish/unpublish on GitHub Pages
 src/platforms.py     Instagram, YouTube and TikTok clients
 src/publish.py       orchestrate publishing and publish-gated cleanup
 src/prune.py         age out old reels
+src/media.py         shared ffmpeg helpers
 config.json          all tunable settings
 CLAUDE.md            project rules and design decisions
 POSTING.md           hosting rationale and platform approval status

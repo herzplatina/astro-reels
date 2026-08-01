@@ -26,6 +26,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from media import probe_duration, require_tools
+
 ROOT = Path(__file__).resolve().parent.parent
 MUSIC_DIR = ROOT / "assets" / "music"
 MANIFEST = MUSIC_DIR / "manifest.json"
@@ -221,7 +223,7 @@ def build_preview(seconds: float = 3.0) -> Path:
         clip = scratch / f"{number:03d}.mp3"
         # Sample from a quarter of the way in — the opening of a track is often
         # a fade or silence, which would tell you nothing.
-        offset = max(0.0, _probe_seconds(track) * 0.25)
+        offset = max(0.0, probe_duration(track) * 0.25)
         subprocess.run(
             [
                 "ffmpeg",
@@ -281,27 +283,6 @@ def build_preview(seconds: float = 3.0) -> Path:
     return out
 
 
-def _probe_seconds(path: Path) -> float:
-    proc = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    try:
-        return float(proc.stdout.strip())
-    except ValueError:
-        return 0.0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
@@ -314,6 +295,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.preview:
+        require_tools()
         build_preview()
         return 0
 

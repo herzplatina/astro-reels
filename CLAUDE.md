@@ -92,10 +92,9 @@ The API clients are **untested against the live APIs** — approvals are pending
 
 ## Pre-flight checks
 
-`src/validate.py` runs on the composed frame before ffmpeg is invoked. Three
-checks are **errors** that stop the render; one is a **warning**.
-
-Errors — measured from actual pixels, not estimated:
+`src/validate.py` runs on the composed frame before ffmpeg is invoked. All three
+checks are errors that stop the render, measured from actual pixels rather than
+estimated:
 
 - **overflow** — glyph bounding box must sit inside the safe area. The safe area
   accounts for the zoom: at `zoom_amount` 1.06 the last frame shows only ~94% of
@@ -141,7 +140,8 @@ all four of those settings — most likely back to `cover` with a scrim.
 Measured, not estimated:
 
 - One reel ≈ **1.2 MB** (7–15s at CRF 20). ~15 MB/month at 3 reels/week.
-- Music library: **146 MB, fixed** — it does not grow. 58 CC0 tracks.
+- Music library: **146 MB, fixed** — it does not grow. 55 CC0 tracks
+  (58 fetched, 3 quarantined for containing a human voice).
 - Retention: `output/` is pruned after every render — reels older than 60 days
   go, but the newest 10 are always kept. Tune under `retention` in `config.json`,
   or run `python3 src/prune.py --dry-run` to preview.
@@ -168,3 +168,16 @@ plus `--seed`. Nothing in `assets/` is ever touched.
 
 Platform APIs are all free, but each has an approval gate before public posts
 are possible. Track progress in `POSTING.md`.
+
+## Testing
+
+`tests/conftest.py` replaces every hosting and network entry point with a
+function that fails the test. This is not belt-and-braces: a fixture once
+stubbed `hosting.publish`, the code was later changed to call `hosting.push`,
+and the suite silently began pushing a fake video to the live Pages branch.
+Stub what a test needs explicitly; never rely on the stub still covering the
+path the code takes.
+
+State on disk is written through a temp file and `os.replace`. A partial write
+to `publish_state.json` would erase the record of what was already published,
+and the next run would post it all again.

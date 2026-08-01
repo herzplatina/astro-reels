@@ -33,9 +33,16 @@ def prune(
     if not OUTPUT_DIR.is_dir():
         return [], 0.0
 
-    reels = sorted(
-        OUTPUT_DIR.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
+    # Read each mtime once, tolerating a file that disappears between the glob
+    # and the stat — a concurrent render or a manual delete should not abort the
+    # whole prune.
+    dated = []
+    for reel in OUTPUT_DIR.glob("*.mp4"):
+        try:
+            dated.append((reel.stat().st_mtime, reel))
+        except FileNotFoundError:
+            continue
+    reels = [reel for _, reel in sorted(dated, key=lambda pair: pair[0], reverse=True)]
     # The newest N are exempt regardless of age, so a quiet month never leaves
     # you with nothing to look back at.
     candidates = reels[keep_minimum:]
@@ -45,14 +52,19 @@ def prune(
     freed = 0.0
 
     for reel in candidates:
-        if reel.stat().st_mtime >= cutoff:
+        try:
+            stats = reel.stat()
+        except FileNotFoundError:
             continue
+        if stats.st_mtime >= cutoff:
+            continue
+
         caption = reel.with_suffix(".caption.txt")
-        freed += reel.stat().st_size
+        freed += stats.st_size
         if caption.exists():
             freed += caption.stat().st_size
         if not dry_run:
-            reel.unlink()
+            reel.unlink(missing_ok=True)
             caption.unlink(missing_ok=True)
         removed.append(reel)
 

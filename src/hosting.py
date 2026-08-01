@@ -153,8 +153,14 @@ def wait_until_live(url: str, timeout: int = AVAILABILITY_TIMEOUT_S) -> bool:
     return False
 
 
-def publish(video: Path, wait: bool = True) -> str:
-    """Put one video on Pages and return its public URL."""
+def push(video: Path) -> str:
+    """Push one video to the hosting branch and return its URL, without waiting.
+
+    Separate from the availability wait so a caller can record that the file is
+    now public *before* blocking on the Pages build. If the wait were folded in
+    here, a build timeout would raise with the file already pushed and the
+    caller holding no record of it — publicly hosted, invisible to cleanup.
+    """
     if not video.is_file():
         raise HostingError(f"No such file: {video}")
 
@@ -163,8 +169,12 @@ def publish(video: Path, wait: bool = True) -> str:
     target_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(video, target_dir / video.name)
     _commit_and_push(f"host {video.name}")
+    return public_url(video.name)
 
-    url = public_url(video.name)
+
+def publish(video: Path, wait: bool = True) -> str:
+    """Put one video on Pages and return its public URL once it is serving."""
+    url = push(video)
     if wait and not wait_until_live(url):
         raise HostingError(
             f"{url} did not become available within {AVAILABILITY_TIMEOUT_S}s.\n"
