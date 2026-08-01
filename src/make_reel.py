@@ -63,7 +63,35 @@ class Track:
 
 
 def load_config() -> dict:
-    return json.loads(CONFIG_PATH.read_text())
+    cfg = json.loads(CONFIG_PATH.read_text())
+
+    # Several of these are interpolated into an ffmpeg -filter_complex string.
+    # Coercing them here means a value like "1,amovie=/etc/passwd" fails loudly
+    # at load rather than becoming an extra filter in the graph.
+    numeric = {
+        "video": {"width": int, "height": int, "fps": int, "zoom_amount": float},
+        "audio": {"fade_in_seconds": float, "fade_out_seconds": float},
+        "duration": {
+            "words_per_second": float,
+            "buffer_seconds": float,
+            "min_seconds": float,
+            "max_seconds": float,
+        },
+    }
+    for section, fields in numeric.items():
+        for key, cast in fields.items():
+            if key in cfg.get(section, {}):
+                try:
+                    cfg[section][key] = cast(cfg[section][key])
+                except (TypeError, ValueError):
+                    raise SystemExit(
+                        f"config.json: {section}.{key} must be a number, "
+                        f"got {cfg[section][key]!r}"
+                    ) from None
+
+    if cfg.get("duration", {}).get("words_per_second", 1) <= 0:
+        raise SystemExit("config.json: duration.words_per_second must be > 0.")
+    return cfg
 
 
 # ---------------------------------------------------------------- duration
@@ -374,6 +402,18 @@ def slugify(text: str, limit: int = 40) -> str:
     return (slug[:limit].rstrip("-")) or "reel"
 
 
+def _caption_text(caption: Path) -> str:
+    """Recover the exact overlay text from a caption file written by write_captions."""
+    body = caption.read_text()
+    marker = "--- INSTAGRAM ---"
+    if marker not in body:
+        # A hand-written or older caption file: compare the whole body.
+        return body.strip()
+    section = body.split(marker, 1)[1]
+    # The text runs up to the blank line that precedes the hashtags.
+    return section.strip().split("\n\n", 1)[0].strip()
+
+
 def unique_output_path(directory: Path, text: str) -> Path:
     """Pick an output path that will not silently destroy a different reel.
 
@@ -389,8 +429,10 @@ def unique_output_path(directory: Path, text: str) -> Path:
 
     while candidate.exists():
         caption = candidate.with_suffix(".caption.txt")
-        # No caption to compare against: treat as foreign and step aside.
-        if caption.exists() and text in caption.read_text():
+        # Exact match, never a substring: one text being a prefix of another
+        # collapses to the same truncated slug, and a substring test would then
+        # hand back the other reel's path and overwrite it.
+        if caption.exists() and _caption_text(caption) == text:
             return candidate
         candidate = directory / f"{base}-{index}.mp4"
         index += 1

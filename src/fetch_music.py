@@ -12,6 +12,7 @@ left alone.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -113,7 +114,14 @@ def search(query: str) -> list[dict]:
 
 
 def download_and_normalise(item: dict, category: str) -> Track | None:
-    track_id = item["id"]
+    track_id = str(item["id"])
+    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", track_id):
+        # The id lands in a filesystem path; a hostile or buggy response
+        # containing "../" would write outside the library.
+        print(
+            f"  ! skipped track with suspicious id {track_id[:40]!r}", file=sys.stderr
+        )
+        return None
     dest = MUSIC_DIR / category / f"{track_id}.mp3"
     dest.parent.mkdir(parents=True, exist_ok=True)
 

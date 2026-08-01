@@ -19,10 +19,13 @@ than double-posting.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import hosting
@@ -77,12 +80,52 @@ def load_state() -> dict:
         return {}
 
 
-def save_state(state: dict) -> None:
-    """Write atomically: a partial write here would erase the publish history."""
+def save_state(state: dict, dry_run: bool = False) -> None:
+    """Write atomically: a partial write here would erase the publish history.
+
+    A dry run must never reach this. Recording a rehearsal as real would mark
+    every platform "published", and since that state is the only gate on whether
+    a platform is attempted, the subsequent real run would post nothing at all
+    while reporting success.
+    """
+    if dry_run:
+        return
+
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    os.replace(tmp, STATE_PATH)  # atomic on POSIX; never a half-written file
+    # A unique temp name: a fixed one is a shared path between processes, and
+    # two concurrent writers race on it.
+    handle, temp_name = tempfile.mkstemp(dir=STATE_PATH.parent, suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w") as fh:
+            json.dump(state, fh, indent=2)
+        os.replace(temp_name, STATE_PATH)  # atomic; never a half-written file
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def state_lock():
+    """Serialise publish runs.
+
+    Without this, two overlapping runs each read the state, each decide a
+    platform is unpublished, and both post it — or one's final write silently
+    discards the other's record of a successful publish.
+    """
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = STATE_PATH.with_suffix(".lock")
+    with open(lock_path, "w") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise SystemExit(
+                "Another publish run is in progress (lock held on "
+                f"{lock_path.name}). Wait for it to finish."
+            ) from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def entry_for(state: dict, video: Path) -> dict:
@@ -181,6 +224,11 @@ def read_caption(video: Path, platform: str) -> str:
     marker = f"--- {platform.upper()} ---"
     text = caption_file.read_text()
     if marker not in text:
+        # Returning the whole file would post another platform's section,
+        # marker line and all — and YouTube would take "--- INSTAGRAM ---" as
+        # its title. Fall back to the slug only if no section exists at all.
+        if any(f"--- {p.upper()} ---" in text for p in PLATFORMS):
+            return video.stem.replace("-", " ")
         return text.strip()
     section = text.split(marker, 1)[1]
     for other in PLATFORMS:
@@ -219,7 +267,38 @@ def publish_one(platform: str, video: Path, url: str, dry_run: bool) -> PublishR
     return PublishResult(False, error=f"unknown platform {platform!r}")
 
 
-def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> int:
+def confirm_approval(video: Path, targets: list[str], assume_yes: bool) -> None:
+    """Require an explicit go-ahead before anything is posted publicly.
+
+    The standing instruction is that the rendered video is reviewed and approved
+    before it goes out — never fire-and-forget. Enforcing it here rather than
+    trusting the operator to remember means a stray invocation, a shell history
+    recall or a scripted loop cannot post unseen.
+    """
+    if assume_yes:
+        return
+
+    print(f"\n  About to publish to: {', '.join(targets)}")
+    print(f"  {video}")
+    print("  Watch it first — this posts publicly and cannot be undone here.")
+
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "  Refusing to publish without confirmation.\n"
+            "  Run interactively, or pass --yes if you have already reviewed it."
+        )
+
+    answer = input("  Type 'publish' to confirm: ").strip().lower()
+    if answer != "publish":
+        raise SystemExit("  Cancelled — nothing was posted.")
+
+
+def run(
+    video: Path,
+    dry_run: bool = False,
+    only: list[str] | None = None,
+    assume_yes: bool = False,
+) -> int:
     state = load_state()
     entry = entry_for(state, video)
 
@@ -230,7 +309,11 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
         already = [p for p in only if p not in outstanding]
         if already:
             print(f"  skipping {', '.join(already)} — already published")
-        targets = [p for p in only if p in outstanding]
+        blocked = set(blocked_platforms(entry))
+        stuck = [p for p in only if p in blocked]
+        if stuck:
+            print(f"  skipping {', '.join(stuck)} — no retries left; use --retry")
+        targets = [p for p in only if p in outstanding and p not in blocked]
     else:
         targets = retryable_platforms(entry)
 
@@ -240,7 +323,7 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
     if not targets:
         if all_published(entry):
             release_host(entry, video, dry_run, "all three confirmed")
-            save_state(state)
+            save_state(state, dry_run)
             print(f"{video.name} is published everywhere.")
             return 0
 
@@ -254,8 +337,11 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
             "  still hosted. Fix the cause and use --retry, or give up on this reel\n"
             f"  with --abandon {video.stem} to release the host."
         )
-        save_state(state)
+        save_state(state, dry_run)
         return 1
+
+    if not dry_run:
+        confirm_approval(video, targets, assume_yes)
 
     # Host first. Instagram cannot publish without a public URL, and hosting
     # once for all retries keeps the URL stable.
@@ -272,10 +358,10 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
             # orphan it with no record anywhere.
             entry["hosted_url"] = hosting.push(video)
             entry["hosted_at"] = _now()
-            save_state(state)
+            save_state(state, dry_run)
 
             if not hosting.wait_until_live(entry["hosted_url"]):
-                save_state(state)
+                save_state(state, dry_run)
                 raise SystemExit(
                     f"  {entry['hosted_url']} did not start serving within "
                     f"{hosting.AVAILABILITY_TIMEOUT_S}s.\n"
@@ -283,7 +369,7 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
                     f"--abandon {video.stem} to release it."
                 )
             print(f"  hosted at {entry['hosted_url']}")
-        save_state(state)
+        save_state(state, dry_run)
 
     for platform in targets:
         previous = entry["platforms"].get(platform, {})
@@ -307,7 +393,7 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
                 else f"attempt {attempts}/{MAX_ATTEMPTS}"
             )
             print(f"  {platform:10} FAILED  [{note}] {result.error}")
-        save_state(state)
+        save_state(state, dry_run)
 
     # The rule: the host is released only when every platform has confirmed.
     if all_published(entry):
@@ -316,7 +402,7 @@ def run(video: Path, dry_run: bool = False, only: list[str] | None = None) -> in
         remaining = ", ".join(pending_platforms(entry))
         print(f"  kept hosted — not yet published on: {remaining}")
 
-    save_state(state)
+    save_state(state, dry_run)
     return 0 if all_published(entry) else 1
 
 
@@ -342,7 +428,7 @@ def abandon(slug: str, dry_run: bool = False) -> int:
     release_host(entry, Path(entry["file"]), dry_run, f"abandoned {slug}")
     if not dry_run:
         entry["abandoned"] = True
-        save_state(state)
+        save_state(state, dry_run)
     return 0
 
 
@@ -403,6 +489,10 @@ def sweep(dry_run: bool = False) -> int:
             continue
         try:
             when = dt.datetime.fromisoformat(hosted_at)
+            if when.tzinfo is None:
+                # Parses cleanly but is not comparable to an aware cutoff, and
+                # the TypeError would abort the sweep for every later entry too.
+                when = when.replace(tzinfo=dt.timezone.utc)
         except ValueError:
             # An unparseable timestamp must not stop the sweep reaching the rest
             # of the list; treat it as old enough to deal with.
@@ -420,10 +510,15 @@ def sweep(dry_run: bool = False) -> int:
         if not dry_run:
             hosting.unpublish(name)
             entry["cleaned_up"] = True
+            # Forget the URL as well: run() only hosts when hosted_url is empty,
+            # so leaving it set would retry the remaining platforms against a
+            # file that no longer exists, with no way to re-host.
+            entry["hosted_url"] = ""
+            entry["hosted_at"] = ""
         released += 1
 
     if not dry_run:
-        save_state(state)
+        save_state(state, dry_run)
     if not released:
         print(f"Nothing stranded beyond {STRANDED_AFTER_DAYS} days.")
     return 0
@@ -444,14 +539,21 @@ def main() -> int:
     parser.add_argument(
         "--only", nargs="+", choices=PLATFORMS, help="Publish to these platforms only."
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the approval prompt. Only for a video you have already watched.",
+    )
     args = parser.parse_args()
 
     if args.status:
         return show_status()
     if args.sweep:
-        return sweep(args.dry_run)
+        with state_lock():
+            return sweep(args.dry_run)
     if args.abandon:
-        return abandon(args.abandon, args.dry_run)
+        with state_lock():
+            return abandon(args.abandon, args.dry_run)
 
     if args.retry:
         state = load_state()
@@ -461,6 +563,7 @@ def main() -> int:
         video = ROOT / entry["file"]
         if not video.exists():
             raise SystemExit(f"{video} is gone — re-render before retrying.")
+        entry = entry_for(state, video)  # migrate before indexing into it
 
         # An explicit retry is a person saying they have fixed the cause, so it
         # clears the block that automatic runs respect. Otherwise repairing
@@ -468,16 +571,23 @@ def main() -> int:
         for platform in pending_platforms(entry):
             entry["platforms"][platform]["permanent"] = False
             entry["platforms"][platform]["attempts"] = 0
-        save_state(state)
+        save_state(state, args.dry_run)
 
-        return run(video, args.dry_run, only=pending_platforms(entry))
+        with state_lock():
+            return run(
+                video,
+                args.dry_run,
+                only=pending_platforms(entry),
+                assume_yes=args.yes,
+            )
 
     if not args.video:
         parser.error("Provide a video, or use --status / --sweep / --retry.")
     if not args.video.exists():
         raise SystemExit(f"No such file: {args.video}")
 
-    return run(args.video, args.dry_run, only=args.only)
+    with state_lock():
+        return run(args.video, args.dry_run, only=args.only, assume_yes=args.yes)
 
 
 if __name__ == "__main__":

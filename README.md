@@ -94,6 +94,10 @@ python3 src/publish.py --retry <slug>              # retry only what failed
 python3 src/publish.py --abandon <slug>            # give up, release the host
 ```
 
+Publishing always asks for confirmation first — you type `publish` to proceed,
+and a non-interactive run refuses outright unless you pass `--yes`. Nothing goes
+out unseen.
+
 The video is pushed to GitHub Pages, published to all three platforms
 independently, and **removed from hosting only once all three confirm**. A
 partial success keeps it hosted so the failures can be retried against the same
@@ -149,7 +153,7 @@ The default `text.font` is a macOS path. On Linux or Windows the tool falls back
 to a bundled-serif search, but set `text.font` to something you actually like.
 
 ```bash
-python3 -m pytest tests/ -q    # 116 tests, no ffmpeg or network needed
+python3 -m pytest tests/ -q    # 139 tests, no network needed
 ```
 
 ## Music licensing

@@ -60,6 +60,9 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(
         publish_mod.hosting, "public_url", lambda name: f"https://host/{name}"
     )
+    # These tests drive the state machine, not the human gate; the gate has its
+    # own tests below.
+    monkeypatch.setattr(publish_mod, "confirm_approval", lambda v, t, y: None)
     return video, hosted
 
 
@@ -530,3 +533,137 @@ def test_youtube_never_gets_an_empty_title(workspace, monkeypatch):
     )
     publish_mod.publish_one("youtube", video, "https://host/x", dry_run=False)
     assert captured["title"].strip()
+
+
+# ------------------------------------------- regressions found by the review
+
+
+def test_dry_run_never_writes_state(workspace, monkeypatch):
+    """The bug this guards is the worst one found: a rehearsal recording itself
+    as real, which made the subsequent real publish a silent no-op."""
+    video, _ = workspace
+    _results(monkeypatch, {p: True for p in publish_mod.PLATFORMS})
+
+    publish_mod.run(video, dry_run=True)
+    assert not publish_mod.STATE_PATH.exists()
+    assert publish_mod.load_state() == {}
+
+
+def test_a_real_run_after_a_dry_run_actually_publishes(workspace, monkeypatch):
+    video, _ = workspace
+    attempted: list[str] = []
+
+    def recording(platform, v, u, d):
+        if not d:
+            attempted.append(platform)
+        return PublishResult(True, post_id=platform)
+
+    monkeypatch.setattr(publish_mod, "publish_one", recording)
+    publish_mod.run(video, dry_run=True)
+    publish_mod.run(video)
+    assert sorted(attempted) == sorted(publish_mod.PLATFORMS)
+
+
+def test_save_state_honours_dry_run_directly(workspace):
+    publish_mod.save_state({"x": 1}, dry_run=True)
+    assert not publish_mod.STATE_PATH.exists()
+    publish_mod.save_state({"x": 1}, dry_run=False)
+    assert publish_mod.STATE_PATH.exists()
+
+
+def test_only_respects_the_attempt_ceiling(workspace, monkeypatch):
+    """--only chooses which platforms to try; it is not a licence to ignore a
+    permanent refusal."""
+    video, _ = workspace
+    _failing(
+        monkeypatch,
+        {"instagram": (False, True), "youtube": (True, False), "tiktok": (True, False)},
+    )
+    publish_mod.run(video)
+
+    attempted = []
+    monkeypatch.setattr(
+        publish_mod,
+        "publish_one",
+        lambda p, v, u, d: attempted.append(p) or PublishResult(True, post_id="x"),
+    )
+    publish_mod.run(video, only=["instagram"])
+    assert attempted == []
+
+
+def test_sweep_clears_the_url_so_a_retry_can_rehost(workspace, monkeypatch):
+    """Releasing the file while keeping hosted_url set wedged the reel: run()
+    only hosts when the URL is empty, so retries hit a dead link forever."""
+    video, _ = workspace
+    _results(monkeypatch, {"instagram": False, "youtube": True, "tiktok": True})
+    publish_mod.run(video)
+
+    state = publish_mod.load_state()
+    stale = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=99)
+    state["a-reel"]["hosted_at"] = stale.isoformat(timespec="seconds")
+    publish_mod.save_state(state)
+    publish_mod.sweep()
+
+    assert publish_mod.load_state()["a-reel"]["hosted_url"] == ""
+
+
+def test_sweep_handles_a_timezone_naive_timestamp(workspace, monkeypatch):
+    """It parses cleanly, so ValueError never fired — it died comparing it."""
+    video, hosted = workspace
+    _results(monkeypatch, {"instagram": True, "youtube": False, "tiktok": False})
+    publish_mod.run(video)
+
+    state = publish_mod.load_state()
+    state["a-reel"]["hosted_at"] = "2020-01-01T00:00:00"  # naive
+    publish_mod.save_state(state)
+
+    publish_mod.sweep()
+    assert hosted == {}
+
+
+def test_retry_migrates_an_entry_missing_a_platform(workspace, monkeypatch):
+    """--retry indexed platforms directly and KeyErrored on an older record."""
+    video, _ = workspace
+    state = {
+        "a-reel": {
+            "file": "a-reel.mp4",
+            "platforms": {"instagram": {"status": "pending"}},
+        }
+    }
+    entry = publish_mod.entry_for(state, video)
+    for platform in publish_mod.pending_platforms(entry):
+        entry["platforms"][platform]["permanent"] = False
+    assert set(entry["platforms"]) == set(publish_mod.PLATFORMS)
+
+
+# --------------------------------------------------------- the approval gate
+
+
+def test_publishing_requires_confirmation(tmp_path, monkeypatch):
+    """Nothing may be posted publicly without an explicit go-ahead."""
+    video = tmp_path / "a-reel.mp4"
+    monkeypatch.setattr(publish_mod.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit) as caught:
+        publish_mod.confirm_approval(video, ["instagram"], assume_yes=False)
+    assert "Refusing to publish" in str(caught.value)
+
+
+def test_typing_anything_but_publish_cancels(tmp_path, monkeypatch):
+    video = tmp_path / "a-reel.mp4"
+    monkeypatch.setattr(publish_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: "yes")
+    with pytest.raises(SystemExit) as caught:
+        publish_mod.confirm_approval(video, ["instagram"], assume_yes=False)
+    assert "Cancelled" in str(caught.value)
+
+
+def test_typing_publish_proceeds(tmp_path, monkeypatch):
+    video = tmp_path / "a-reel.mp4"
+    monkeypatch.setattr(publish_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: "publish")
+    assert publish_mod.confirm_approval(video, ["instagram"], assume_yes=False) is None
+
+
+def test_yes_flag_skips_the_prompt(tmp_path):
+    video = tmp_path / "a-reel.mp4"
+    assert publish_mod.confirm_approval(video, ["instagram"], assume_yes=True) is None

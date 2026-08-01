@@ -163,6 +163,12 @@ def push(video: Path) -> str:
     """
     if not video.is_file():
         raise HostingError(f"No such file: {video}")
+    if video.suffix.lower() != ".mp4":
+        # This copies a file to a public site and force-pushes it. An allowlist
+        # is the difference between a typo and publishing credentials.
+        raise HostingError(
+            f"Refusing to host {video.name}: only .mp4 files may be published."
+        )
 
     ensure_clone()
     target_dir = CLONE / SUBDIR
@@ -186,7 +192,7 @@ def publish(video: Path, wait: bool = True) -> str:
 def unpublish(filename: str) -> bool:
     """Remove one video from Pages. Returns whether anything was removed."""
     ensure_clone()
-    target = CLONE / SUBDIR / filename
+    target = CLONE / SUBDIR / Path(filename).name  # never escape the clone
     if not target.exists():
         return False
     target.unlink()

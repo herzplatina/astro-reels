@@ -138,3 +138,42 @@ def test_the_matched_terms_are_reported():
     flagged, reasons = screen("untitled", ["Peoples", "Chats"], [])
     assert flagged
     assert set(reasons) == {"people", "chat"}
+
+
+# ------------------------------------------- regressions found by the review
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "female vocal",
+        "male voice",
+        "mixed choir",
+        "spoken word",
+        "human voice",
+        "choir singing",
+        "vocal jazz",
+        "a cappella",
+    ],
+)
+def test_multi_word_vocal_tags_are_caught(tag):
+    """Tags were joined character-wise, gluing 'female vocal' into one token
+    that could never match. Every one of these passed as instrumental."""
+    assert is_vocal(tags=[tag])
+
+
+def test_multi_word_genres_are_caught():
+    assert is_vocal(genres=["Spoken Word"])
+
+
+def test_punctuated_tags_are_split():
+    assert is_vocal(tags=["female-vocal"])
+    assert is_vocal(tags=["voice/choir"])
+
+
+def test_multi_word_instrument_tags_still_survive():
+    """The fix must not start flagging instruments."""
+    assert not is_vocal(
+        title="Tibetan Singing Bowl", tags=["singing bowl", "meditation"]
+    )
+    assert not is_vocal(tags=["grand piano", "soft ambient"])

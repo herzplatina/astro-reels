@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,7 @@ VOCAL_TERMS = frozenset(
         "chanted",
         "acapella",
         "a-cappella",
+        "cappella",
         "lyric",
         "lyrics",
         "speech",
@@ -157,8 +159,12 @@ def screen(title: str, tags: list[str], genres: list[str]) -> tuple[bool, list[s
 
     Returns (is_vocal, matched_terms).
     """
-    raw = [t for t in tags + genres]
-    raw += title.replace("_", " ").replace("-", " ").replace(".", " ").split()
+    # Split every field on whitespace and punctuation. Joining the characters
+    # instead would glue a multi-word tag into one token that can never match:
+    # "female vocal" became "femalevocal" and passed as instrumental.
+    raw: list[str] = []
+    for field in [*tags, *genres, title]:
+        raw += re.split(r"[\s_\-./,;:()\[\]]+", field)
 
     # Normalise hard, because the misses are all near-misses: a tag reading
     # "Peoples" rather than "people", or a filename token like "song23".
@@ -186,8 +192,21 @@ def screen(title: str, tags: list[str], genres: list[str]) -> tuple[bool, list[s
     return False, []
 
 
+def _safe_under(root: Path, candidate: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def quarantine(track: dict, reasons: list[str], dry_run: bool) -> bool:
     source = ROOT / track["filename"]
+    # manifest.json is tracked and editable by pull request; its paths must not
+    # be able to reach outside the music library.
+    if not _safe_under(MUSIC_DIR, source):
+        print(f"  ! refusing path outside the library: {track['filename']!r}")
+        return False
     if not source.exists():
         return False
 

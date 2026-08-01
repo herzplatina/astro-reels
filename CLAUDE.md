@@ -41,6 +41,10 @@ H.264 output in `output/`.
 `src/publish.py` orchestrates; `src/hosting.py` handles GitHub Pages;
 `src/platforms.py` holds the three API clients.
 
+**Nothing is published without explicit human approval.** `confirm_approval()`
+runs before the first side effect; a non-TTY run refuses unless `--yes` is
+passed. Do not add a code path that reaches a platform API without it.
+
 **The rule that governs everything: a video is removed from hosting only once
 all three platforms have confirmed publication.** Anything short of that keeps
 it hosted so the failures can be retried against the same URL. Do not "optimise"
@@ -181,3 +185,26 @@ path the code takes.
 State on disk is written through a temp file and `os.replace`. A partial write
 to `publish_state.json` would erase the record of what was already published,
 and the next run would post it all again.
+
+## Things a review has already caught once
+
+Do not reintroduce these:
+
+- **A dry run must never write state.** `save_state(state, dry_run)` returns
+  early. Recording a rehearsal marked every platform published, and since that
+  state is the only gate on whether a platform is attempted, the following real
+  run posted nothing while printing success.
+- **Screening splits on whitespace and punctuation.** Joining tag characters
+  glued `"female vocal"` into one token that could never match, so multi-word
+  vocal tags passed as instrumental.
+- **`unique_output_path` compares text exactly, never as a substring.** Slugs
+  truncate at 40 characters, so one text being a prefix of another collapsed to
+  the same path and ffmpeg's `-y` destroyed the earlier reel.
+- **A TikTok draft in the creator inbox is not published.** `SEND_TO_USER_INBOX`
+  must not report success, or the host is released for a post nobody can see.
+- **Publish runs hold an exclusive lock.** Two overlapping runs each read the
+  state, each decided a platform was unpublished, and both posted it.
+- **No credential in a URL.** Tokens go in an `Authorization` header; a token in
+  a query string reaches exception text, the terminal, and `publish_state.json`.
+- **Config values that reach the ffmpeg filtergraph are coerced numerically** at
+  `load_config()`, and only `.mp4` may be handed to `hosting.push`.

@@ -228,3 +228,20 @@ def test_dry_run_reports_without_deleting(output_dir):
 def test_prune_on_a_missing_directory_is_a_no_op(tmp_path, monkeypatch):
     monkeypatch.setattr(prune_mod, "OUTPUT_DIR", tmp_path / "nope")
     assert prune_mod.prune(days=60, keep_minimum=0) == ([], 0.0)
+
+
+def test_a_text_that_is_a_prefix_of_another_does_not_overwrite_it(tmp_path):
+    """Both truncate to the same 40-char slug. A substring comparison handed
+    back the other reel's path and ffmpeg -y destroyed it."""
+    longer = "The moon in your chart shapes your emotional weather patterns deeply"
+    shorter = "The moon in your chart shapes your emotional weather"
+    assert make_reel.slugify(longer) == make_reel.slugify(shorter)
+
+    first = make_reel.unique_output_path(tmp_path, longer)
+    first.touch()
+    first.with_suffix(".caption.txt").write_text(
+        f"--- INSTAGRAM ---\n{longer}\n\n#tag\n"
+    )
+
+    second = make_reel.unique_output_path(tmp_path, shorter)
+    assert second != first

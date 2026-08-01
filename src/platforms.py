@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,6 +69,14 @@ def load_credentials(platform: str) -> dict:
             f"No credentials at {CREDENTIALS}.\n"
             "Copy secrets/credentials.example.json and fill it in."
         )
+    mode = CREDENTIALS.stat().st_mode
+    if mode & 0o077:
+        print(
+            f"  ! {CREDENTIALS} is readable by other users on this machine "
+            f"({oct(mode & 0o777)}). Fix with: chmod 600 {CREDENTIALS}",
+            file=sys.stderr,
+        )
+
     try:
         data = json.loads(CREDENTIALS.read_text())
     except json.JSONDecodeError as exc:
@@ -100,9 +109,13 @@ def _request(
     except urllib.error.HTTPError as exc:
         body, status = exc.read(), exc.code
     try:
-        return status, json.loads(body)
+        parsed = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return status, body
+        # An HTML error page from a proxy, or an empty body. Callers all treat
+        # the result as a mapping, so hand back one rather than raw bytes and
+        # let them fail on the status instead of an AttributeError.
+        return status, {"_raw": body[:400].decode("utf-8", "replace")}
+    return status, parsed if isinstance(parsed, dict) else {"_raw": parsed}
 
 
 def _form(payload: dict) -> bytes:
@@ -155,7 +168,8 @@ def publish_instagram(
     deadline = time.time() + poll_seconds
     while time.time() < deadline:
         status, body = _request(
-            f"{base}/{container}?fields=status_code,status&access_token={token}"
+            f"{base}/{container}?fields=status_code,status",
+            headers={"Authorization": f"Bearer {token}"},
         )
         code = (body or {}).get("status_code")
         if code == "FINISHED":
@@ -202,7 +216,11 @@ def _youtube_access_token(creds: dict) -> str:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     if status != 200 or "access_token" not in body:
-        raise RuntimeError(f"token refresh failed: {body}")
+        # A refused refresh token is not something a retry fixes.
+        raise CredentialsMissing(
+            f"YouTube token refresh was refused ({status}). "
+            "The refresh token is expired or revoked — re-authorise."
+        )
     return body["access_token"]
 
 
@@ -244,7 +262,11 @@ def publish_youtube(video: Path, title: str, description: str) -> PublishResult:
         with urllib.request.urlopen(request, timeout=120) as response:
             upload_url = response.headers.get("Location")
     except urllib.error.HTTPError as exc:
-        return PublishResult(False, error=f"resumable init failed: {exc.read()!r}")
+        return PublishResult(
+            False,
+            error=f"resumable init failed: {exc.read()!r}",
+            permanent=exc.code in PERMANENT_STATUSES,
+        )
 
     if not upload_url:
         return PublishResult(False, error="no upload URL returned")
@@ -328,7 +350,11 @@ def publish_tiktok(
     upload_url = data.get("upload_url")
     publish_id = data.get("publish_id")
     if status != 200 or not upload_url:
-        return PublishResult(False, error=f"init failed: {body}")
+        return PublishResult(
+            False,
+            error=f"init failed: {body}",
+            permanent=status in PERMANENT_STATUSES,
+        )
 
     payload = video.read_bytes()
     for index in range(chunks):
@@ -381,8 +407,23 @@ def _await_tiktok_publish(
         )
         data = (body or {}).get("data") or {}
         last = data.get("status", "")
-        if last in ("PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"):
+        if last == "PUBLISH_COMPLETE":
             return PublishResult(True, post_id=publish_id)
+        if last == "SEND_TO_USER_INBOX":
+            # The video reached the creator's drafts but is not live. Counting
+            # it as published would release the hosted file for a post nobody
+            # can see. Permanent because re-uploading changes nothing — the
+            # only way forward is a tap in the app, or the app audit.
+            return PublishResult(
+                False,
+                post_id=publish_id,
+                error=(
+                    "delivered to your TikTok inbox as a draft, not published. "
+                    "Open the TikTok app and post it, then --abandon this reel "
+                    "to release the host. Direct posting needs the app audit."
+                ),
+                permanent=True,
+            )
         if last == "FAILED":
             reason = data.get("fail_reason", body)
             return PublishResult(
