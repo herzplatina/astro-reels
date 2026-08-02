@@ -153,7 +153,7 @@ The default `text.font` is a macOS path. On Linux or Windows the tool falls back
 to a bundled-serif search, but set `text.font` to something you actually like.
 
 ```bash
-python3 -m pytest tests/ -q    # 209 tests, no network needed
+python3 -m pytest tests/ -q    # 212 tests, no network needed
 ```
 
 ## Music licensing

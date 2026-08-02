@@ -149,6 +149,9 @@ Measured, not estimated:
 - Retention: `output/` is pruned after every render — reels older than 60 days
   go, but the newest 10 are always kept. Tune under `retention` in `config.json`,
   or run `python3 src/prune.py --dry-run` to preview.
+- `output/.build/` is pruned too, at 24 hours. Intermediate frames are kept when
+  a render fails so you can open them, but nothing removed them afterwards and
+  they accumulated ~300 KB per failure with no ceiling.
 
 Pruning is safe: a deleted reel is re-creatable byte-for-byte from the same text
 plus `--seed`. Nothing in `assets/` is ever touched.

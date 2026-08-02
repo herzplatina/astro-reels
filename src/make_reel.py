@@ -297,10 +297,9 @@ def render_text_layer(text: str, cfg: dict) -> Path:
         text_draw.text((x, y), line, font=font, fill=colour)
 
     shadow = shadow.filter(ImageFilter.GaussianBlur(12))
-    layer = Image.alpha_composite(
-        Image.alpha_composite(Image.new("RGBA", (width, height), (0, 0, 0, 0)), shadow),
-        layer,
-    )
+    # Shadow first, then the glyphs on top. Compositing the shadow onto a fresh
+    # transparent layer first would be an identity step.
+    layer = Image.alpha_composite(shadow, layer)
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     out = BUILD_DIR / f"text_layer_{RUN_ID}.png"

@@ -55,8 +55,7 @@ VOCAL_TERMS = frozenset(
         "chanting",
         "chanted",
         "acapella",
-        "a-cappella",
-        "cappella",
+        "cappella",  # "a cappella" splits to a + cappella
         "lyric",
         "lyrics",
         "speech",
@@ -114,11 +113,12 @@ VOCAL_TERMS = frozenset(
 AMBIGUOUS_TERMS = frozenset({"singing", "sing", "sung", "song", "male", "female"})
 
 # If any of these are present, an ambiguous term is explained and does not count.
+# Tokens only: screen() splits on whitespace and punctuation, so a multi-word
+# entry here could never match. "bowl" already covers "singing bowl".
 INSTRUMENT_CONTEXT = frozenset(
     {
         "bowl",
         "bowls",
-        "singing bowl",
         "tibetan",
         "birdsong",
         "bird",

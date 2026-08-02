@@ -20,7 +20,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "output"
+BUILD_DIR = OUTPUT_DIR / ".build"
 CONFIG_PATH = ROOT / "config.json"
+
+# Intermediate frames are deleted when a render succeeds and deliberately kept
+# when it fails, so you can open them and see what tripped. Nothing removed the
+# ones from a failed run, so they accumulated at ~300 KB a time.
+BUILD_ARTIFACT_HOURS = 24
 
 
 def prune(
@@ -71,16 +77,40 @@ def prune(
     return removed, freed / 1_048_576
 
 
+def prune_build_artifacts(dry_run: bool = False) -> tuple[int, float]:
+    """Delete intermediate frames left behind by failed renders."""
+    if not BUILD_DIR.is_dir():
+        return 0, 0.0
+
+    cutoff = time.time() - BUILD_ARTIFACT_HOURS * 3600
+    count = 0
+    freed = 0.0
+    for artifact in BUILD_DIR.glob("*.png"):
+        try:
+            stats = artifact.stat()
+        except FileNotFoundError:
+            continue
+        if stats.st_mtime >= cutoff:
+            continue
+        freed += stats.st_size
+        if not dry_run:
+            artifact.unlink(missing_ok=True)
+        count += 1
+    return count, freed / 1_048_576
+
+
 def prune_from_config(dry_run: bool = False) -> tuple[list[Path], float]:
     cfg = json.loads(CONFIG_PATH.read_text())
     retention = cfg.get("retention", {})
     if not retention.get("enabled", True):
         return [], 0.0
-    return prune(
+    removed, freed = prune(
         days=retention.get("days", 60),
         keep_minimum=retention.get("keep_minimum", 10),
         dry_run=dry_run,
     )
+    _, build_freed = prune_build_artifacts(dry_run)
+    return removed, freed + build_freed
 
 
 def main() -> int:

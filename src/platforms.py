@@ -126,6 +126,13 @@ def _json_body(payload: dict) -> bytes:
     return json.dumps(payload).encode()
 
 
+def _bearer(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=UTF-8",
+    }
+
+
 # --------------------------------------------------------------- Instagram
 
 
@@ -341,10 +348,7 @@ def publish_tiktok(
                 },
             }
         ),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=UTF-8",
-        },
+        headers=_bearer(token),
     )
     data = (body or {}).get("data") or {}
     upload_url = data.get("upload_url")

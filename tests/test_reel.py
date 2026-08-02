@@ -275,3 +275,51 @@ def test_fit_text_actually_steps_down_through_intermediate_sizes(cfg):
         if smallest < font.size < largest:
             return
     pytest.fail("no text length produced a size between min_size and max_size")
+
+
+def test_orphaned_build_artifacts_are_aged_out(tmp_path, monkeypatch):
+    """A failed render deliberately keeps its intermediate frames for
+    inspection, but nothing removed them — they accumulated ~300 KB per failure
+    with no upper bound."""
+    import os
+    import time as _time
+
+    build = tmp_path / ".build"
+    build.mkdir()
+    monkeypatch.setattr(prune_mod, "BUILD_DIR", build)
+
+    stale = build / "background_999.png"
+    fresh = build / "background_111.png"
+    for path in (stale, fresh):
+        path.write_bytes(b"x" * 4096)
+    old = _time.time() - (prune_mod.BUILD_ARTIFACT_HOURS + 1) * 3600
+    os.utime(stale, (old, old))
+
+    count, freed = prune_mod.prune_build_artifacts()
+
+    assert count == 1
+    assert freed > 0
+    assert not stale.exists()
+    assert fresh.exists(), "a run still in flight must keep its frames"
+
+
+def test_build_artifact_pruning_respects_dry_run(tmp_path, monkeypatch):
+    import os
+    import time as _time
+
+    build = tmp_path / ".build"
+    build.mkdir()
+    monkeypatch.setattr(prune_mod, "BUILD_DIR", build)
+    stale = build / "text_layer_1.png"
+    stale.write_bytes(b"x" * 100)
+    old = _time.time() - 99 * 3600
+    os.utime(stale, (old, old))
+
+    count, _ = prune_mod.prune_build_artifacts(dry_run=True)
+    assert count == 1
+    assert stale.exists()
+
+
+def test_a_missing_build_directory_is_a_no_op(tmp_path, monkeypatch):
+    monkeypatch.setattr(prune_mod, "BUILD_DIR", tmp_path / "nope")
+    assert prune_mod.prune_build_artifacts() == (0, 0.0)

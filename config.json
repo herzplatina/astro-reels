@@ -6,11 +6,14 @@
     "fps": 30,
     "zoom_amount": 1.06,
     "fit_mode": "contain",
-    "pad_color": [0, 0, 0],
+    "pad_color": [
+      0,
+      0,
+      0
+    ],
     "image_anchor": 0.8
   },
   "duration": {
-    "mode": "auto",
     "words_per_second": 2.0,
     "buffer_seconds": 3.0,
     "min_seconds": 7,
@@ -21,7 +24,11 @@
     "font_index": 1,
     "max_size": 76,
     "min_size": 40,
-    "color": [255, 255, 255],
+    "color": [
+      255,
+      255,
+      255
+    ],
     "line_spacing": 1.38,
     "width_fraction": 0.84,
     "vertical_anchor": 0.28,
